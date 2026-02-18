@@ -51,7 +51,9 @@ COLOR_MAP = {
 def get_market_constituents(market_key):
     mkt = MARKETS[market_key]
     
+    # ... (EU_MIX logica blijft hetzelfde, mag je laten staan) ...
     if "EU_MIX" in mkt.get("code", ""):
+        # [Je bestaande EU_MIX code hier...]
         data = {
             "ASML.AS": "Technology", "UNA.AS": "Consumer Staples", "HEIA.AS": "Consumer Staples", 
             "SHELL.AS": "Energy", "INGA.AS": "Financials", "DSM.AS": "Materials", 
@@ -81,6 +83,11 @@ def get_market_constituents(market_key):
         df_clean = target_df[[ticker_col, sector_col]].copy()
         df_clean.columns = ['Ticker', 'Sector']
         df_clean['Ticker'] = df_clean['Ticker'].str.replace('.', '-', regex=False)
+        
+        # --- FIX: Maak robuuster ---
+        # Verwijder spaties voor/achter en zet om naar string
+        df_clean['Sector'] = df_clean['Sector'].astype(str).str.strip()
+        
         return df_clean
     except:
         return pd.DataFrame()
