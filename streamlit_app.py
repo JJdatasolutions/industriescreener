@@ -2,11 +2,11 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import numpy as np
+import requests
 
 # --- CONFIGURATIE ---
-st.set_page_config(page_title="Pro Market Screener 6.0", layout="wide", page_icon="🧭")
+st.set_page_config(page_title="Pro Market Screener 6.1", layout="wide", page_icon="🧭")
 
 # --- 1. DATA DEFINITIES & CONSTANTEN ---
 
@@ -24,7 +24,6 @@ MARKETS = {
     }
 }
 
-# Mapping van Sector Naam naar ETF Ticker (voor relatieve sterkte berekening)
 US_SECTOR_MAP = {
     'Technology': 'XLK', 'Financials': 'XLF', 'Health Care': 'XLV',
     'Energy': 'XLE', 'Consumer Discretionary': 'XLY', 'Industrials': 'XLI',
@@ -46,8 +45,8 @@ def get_market_constituents(market_key):
     """Haalt de lijst met aandelen op."""
     mkt = MARKETS[market_key]
     
+    # --- EUROPA (STATISCH) ---
     if "EU_MIX" in mkt.get("code", ""):
-        # Statische lijst voor stabiliteit
         data = {
             "ASML.AS": "Technology", "UNA.AS": "Consumer Staples", "HEIA.AS": "Consumer Staples", 
             "SHELL.AS": "Energy", "INGA.AS": "Financials", "DSM.AS": "Materials", 
@@ -59,54 +58,69 @@ def get_market_constituents(market_key):
         }
         return pd.DataFrame(list(data.items()), columns=['Ticker', 'Sector'])
 
+    # --- USA (WIKIPEDIA SCRAPER - ROBUUST) ---
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
-        tables = pd.read_html(mkt['wiki'], attrs={"id": "constituents"})
-        if not tables: tables = pd.read_html(mkt['wiki']) # Fallback
+        # Lees alle tabellen van de pagina
+        tables = pd.read_html(requests.get(mkt['wiki'], headers=headers).text)
         
-        df = tables[0]
-        
-        # Kolom mapping normaliseren
-        cols = {c: c.lower() for c in df.columns}
-        sym_col = next((k for k, v in cols.items() if 'symbol' in v), None)
-        sec_col = next((k for k, v in cols.items() if 'sector' in v), None)
-        
-        if sym_col and sec_col:
-            df_clean = df[[sym_col, sec_col]].copy()
-            df_clean.columns = ['Ticker', 'Sector']
-            df_clean['Ticker'] = df_clean['Ticker'].str.replace('.', '-', regex=False)
-            return df_clean
+        target_df = pd.DataFrame()
+
+        # Loop door alle gevonden tabellen om de juiste te vinden
+        for df in tables:
+            # Maak kolomnamen lowercase voor makkelijke vergelijking
+            cols = [str(c).lower() for c in df.columns]
             
-        return pd.DataFrame()
-    except:
+            # Check of dit de juiste tabel is (moet Symbol en Sector bevatten)
+            if any("symbol" in c for c in cols) and any("sector" in c for c in cols):
+                target_df = df
+                break
+        
+        if target_df.empty:
+            return pd.DataFrame() # Geen geschikte tabel gevonden
+
+        # Kolommen normaliseren
+        # Vind de exacte kolomnaam voor Symbol en Sector
+        ticker_col = next(c for c in target_df.columns if "Symbol" in str(c) or "Ticker" in str(c))
+        sector_col = next(c for c in target_df.columns if "Sector" in str(c))
+        
+        df_clean = target_df[[ticker_col, sector_col]].copy()
+        df_clean.columns = ['Ticker', 'Sector']
+        df_clean['Ticker'] = df_clean['Ticker'].str.replace('.', '-', regex=False)
+        return df_clean
+
+    except Exception as e:
+        print(f"Scrape error: {e}")
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
 def get_price_data(tickers):
     if not tickers: return pd.DataFrame()
     try:
-        # Download data
         data = yf.download(tickers, period="2y", progress=False, auto_adjust=True)
         
-        # Flatten MultiIndex
+        # Flatten MultiIndex (yfinance stuurt soms complexe headers terug)
         if isinstance(data.columns, pd.MultiIndex):
             if 'Close' in data.columns.get_level_values(0):
                 data = data['Close']
             elif 'Close' in data.columns.get_level_values(1):
                 data = data.xs('Close', level=1, axis=1)
             else:
-                data = data.iloc[:, 0] if data.shape[1] == 1 else data
+                # Fallback: drop level 1 if only tickers are there
+                if data.shape[1] == len(tickers):
+                     data = data.droplevel(1, axis=1) if data.columns.nlevels > 1 else data
+
+        # Als er maar 1 ticker is, is het een Series, maak er DataFrame van
+        if isinstance(data, pd.Series):
+            data = data.to_frame()
+            data.columns = tickers
+
         return data
     except:
         return pd.DataFrame()
 
 def calculate_rrg(df, benchmark_ticker):
-    """
-    Berekent RRG coördinaten.
-    Als benchmark_ticker = 'SPY', vergelijken we met de markt.
-    Als benchmark_ticker = 'XLE', vergelijken we met de sector (Energy).
-    """
-    if benchmark_ticker not in df.columns: return pd.DataFrame()
+    if df.empty or benchmark_ticker not in df.columns: return pd.DataFrame()
     
     rrg_data = []
     bench_series = df[benchmark_ticker]
@@ -114,12 +128,9 @@ def calculate_rrg(df, benchmark_ticker):
     for ticker in df.columns:
         if ticker == benchmark_ticker: continue
         try:
-            # RS Ratio (Relatieve Sterkte vs Benchmark)
             rs = df[ticker] / bench_series
             rs_ma = rs.rolling(100).mean()
             rs_ratio = 100 * (rs / rs_ma)
-            
-            # RS Momentum (Snelheid van de verandering)
             rs_mom = 100 * (rs_ratio / rs_ratio.shift(10))
             
             if len(rs_ratio) < 1: continue
@@ -127,7 +138,6 @@ def calculate_rrg(df, benchmark_ticker):
             curr_r = rs_ratio.iloc[-1]
             curr_m = rs_mom.iloc[-1]
             
-            # Kwadrant bepaling
             if curr_r > 100 and curr_m > 100: status = "1. LEADING"
             elif curr_r < 100 and curr_m > 100: status = "4. IMPROVING"
             elif curr_r < 100 and curr_m < 100: status = "3. LAGGING"
@@ -145,7 +155,6 @@ def calculate_rrg(df, benchmark_ticker):
     return pd.DataFrame(rrg_data)
 
 def calculate_signals(df_prices):
-    """Maakt signaal tabel voor Tab 3"""
     if df_prices.empty: return pd.DataFrame()
     
     stats = []
@@ -155,11 +164,9 @@ def calculate_signals(df_prices):
             curr = series.iloc[-1]
             sma200 = series.rolling(200).mean().iloc[-1]
             
-            # Returns
             ret_1m = (curr / series.shift(21).iloc[-1]) - 1
             ret_3m = (curr / series.shift(63).iloc[-1]) - 1
             
-            # Signaal Logica
             trend = "🟢 BULL" if curr > sma200 else "🔴 BEAR"
             signal = "KOPEN" if (curr > sma200 and ret_1m > 0) else "AFWACHTEN"
             
@@ -185,45 +192,47 @@ sel_sector = st.sidebar.selectbox("Kies Sector (voor Tab 3)", ["Alle Sectoren"] 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🌡️ Markt Thermometer")
 
-# Benchmark Data Ophalen voor Sidebar
 bench_df = get_price_data([market_cfg['benchmark']])
 
 if not bench_df.empty:
-    # Zeker zijn dat het een Series is en geen DataFrame
+    # Scalar fix voor eenduidige data
     s = bench_df.iloc[:, 0] if isinstance(bench_df, pd.DataFrame) else bench_df
     
-    current_price = s.iloc[-1]
-    sma_200 = s.rolling(200).mean().iloc[-1]
-    
-    # Afstand tot SMA (Dispersie)
-    distance_pct = ((current_price - sma_200) / sma_200) * 100
-    
-    if current_price > sma_200:
-        status = "BULL MARKET"
-        color = "green"
-        icon = "📈"
-    else:
-        status = "BEAR MARKET"
-        color = "red"
-        icon = "📉"
+    if len(s) > 200:
+        current_price = s.iloc[-1]
+        sma_200 = s.rolling(200).mean().iloc[-1]
         
-    st.sidebar.markdown(f"Status: :{color}[**{status}**] {icon}")
-    st.sidebar.metric("Afstand tot 200 SMA", f"{distance_pct:.2f}%")
-    
-    # Mini Grafiek: Prijs vs SMA
-    chart_data = s.tail(300).to_frame(name="Koers")
-    chart_data['SMA200'] = s.rolling(200).mean().tail(300)
-    
-    fig_mini = px.line(chart_data, y=["Koers", "SMA200"], height=200, title="Trend")
-    fig_mini.update_layout(showlegend=False, margin=dict(l=0, r=0, t=30, b=0), xaxis_title=None, yaxis_title=None)
-    fig_mini.update_traces(line_color='red', selector=dict(name='SMA200')) # SMA rood maken
-    fig_mini.update_traces(line_color='blue', selector=dict(name='Koers'))
-    st.sidebar.plotly_chart(fig_mini, use_container_width=True)
-
+        # Veiligheidscheck voor null values
+        if pd.notna(current_price) and pd.notna(sma_200):
+            distance_pct = ((current_price - sma_200) / sma_200) * 100
+            
+            if current_price > sma_200:
+                status = "BULL MARKET"
+                color = "green"
+                icon = "📈"
+            else:
+                status = "BEAR MARKET"
+                color = "red"
+                icon = "📉"
+                
+            st.sidebar.markdown(f"Status: :{color}[**{status}**] {icon}")
+            st.sidebar.metric("Afstand tot 200 SMA", f"{distance_pct:.2f}%")
+            
+            chart_data = s.tail(300).to_frame(name="Koers")
+            chart_data['SMA200'] = s.rolling(200).mean().tail(300)
+            
+            fig_mini = px.line(chart_data, y=["Koers", "SMA200"], height=200, title="Trend")
+            fig_mini.update_layout(showlegend=False, margin=dict(l=0, r=0, t=30, b=0), xaxis_title=None, yaxis_title=None)
+            fig_mini.update_traces(line_color='red', selector=dict(name='SMA200'))
+            fig_mini.update_traces(line_color='blue', selector=dict(name='Koers'))
+            st.sidebar.plotly_chart(fig_mini, use_container_width=True)
+        else:
+             st.sidebar.warning("Onvoldoende data voor SMA.")
+    else:
+        st.sidebar.warning("Data te kort voor analyse.")
 else:
-    st.sidebar.warning("Geen data.")
+    st.sidebar.warning("Geen benchmark data.")
 
-# KNOP OM ALLES TE LADEN
 st.sidebar.markdown("---")
 if st.sidebar.button("🚀 Start Analyse", type="primary"):
     st.session_state['active'] = True
@@ -246,121 +255,110 @@ with tab1:
     #### 1. De Vier Kwadranten
     De grafieken in Tab 2 en 3 zijn verdeeld in vier vlakken. Elk vlak vertelt iets over de trend van een aandeel/sector:
     
-    * 🟢 **LEADING (Rechtsboven):** **KOPEN.** Het aandeel is sterk én het momentum is positief. Dit zijn de winnaars van het moment.
-    * 🟠 **WEAKENING (Rechtsonder):** **OPPASSEN.** Het aandeel is nog steeds sterk (trend is omhoog), maar verliest snelheid. Vaak een moment om winst te nemen.
-    * 🔴 **LAGGING (Linksonder):** **VERKOPEN.** Zowel de trend als het momentum zijn negatief. Hier wil je niet zitten.
-    * 🍏 **IMPROVING (Linksboven):** **KANSEN.** Het aandeel is zwak, maar het momentum draait bij naar positief. Dit zijn de potentiële turn-around kandidaten.
+    * 🟢 **LEADING (Rechtsboven):** **KOPEN.** Het aandeel is sterk én het momentum is positief.
+    * 🟠 **WEAKENING (Rechtsonder):** **OPPASSEN.** Het aandeel is sterk, maar verliest snelheid.
+    * 🔴 **LAGGING (Linksonder):** **VERKOPEN.** Trend en momentum zijn negatief.
+    * 🍏 **IMPROVING (Linksboven):** **KANSEN.** Trend draait bij naar positief.
 
-    #### 2. De Sidebar (Linkerkant)
-    * **Markt Thermometer:** Geeft aan of de algemene markt veilig is.
-        * **BULL:** Koers boven het 200-daags gemiddelde. (Veilig om te kopen).
-        * **BEAR:** Koers onder het 200-daags gemiddelde. (Cash is king).
-    * **Dispersie:** Hoeveel procent zitten we boven of onder die trendlijn? Een extreem hoge dispersie (bv +15%) kan betekenen dat de markt 'oververhit' is.
+    #### 2. De Sidebar
+    * **Markt Thermometer:** Geeft aan of de markt veilig is (Boven/Onder SMA 200).
     """)
 
 # === TAB 2: SECTOR ROTATIE ===
 with tab2:
     if st.session_state.get('active'):
         st.subheader("Sector Rotatie Diagram")
-        st.caption("Welke sectoren presteren beter dan de markt?")
         
         with st.spinner("Sector data ophalen..."):
-            # Bepaal de 'spelers' (Sectoren)
             if "USA" in st.session_state['market_key']:
                 tickers = list(US_SECTOR_MAP.values())
-                labels = {v: k for k, v in US_SECTOR_MAP.items()} # Omgekeerde map voor labels
+                labels = {v: k for k, v in US_SECTOR_MAP.items()}
             else:
-                # Voor Europa pakken we de top aandelen als proxy omdat ETF data lastig is
+                # Voor EU: gebruik de constitutents (veilig ophalen)
                 constituents = get_market_constituents(st.session_state['market_key'])
-                tickers = constituents['Ticker'].head(20).tolist()
-                labels = {t: t for t in tickers}
+                if not constituents.empty:
+                    tickers = constituents['Ticker'].head(20).tolist()
+                    labels = {t: t for t in tickers}
+                else:
+                    tickers = []
+                    labels = {}
 
-            # Voeg benchmark toe voor berekening
-            tickers.append(market_cfg['benchmark'])
-            
-            # Data ophalen & Rekenen
-            df_prices = get_price_data(tickers)
-            rrg_df = calculate_rrg(df_prices, market_cfg['benchmark'])
-            
-            if not rrg_df.empty:
-                # Labels netjes maken
-                rrg_df['Label'] = rrg_df['Ticker'].map(labels).fillna(rrg_df['Ticker'])
+            if tickers:
+                tickers.append(market_cfg['benchmark'])
+                df_prices = get_price_data(tickers)
+                rrg_df = calculate_rrg(df_prices, market_cfg['benchmark'])
                 
-                fig = px.scatter(rrg_df, x="RS-Ratio", y="RS-Momentum", 
-                                 color="Kwadrant", text="Label", size="Distance",
-                                 color_discrete_map=COLOR_MAP, height=700,
-                                 title=f"Sectoren t.o.v. {market_cfg['benchmark']}")
-                
-                # Assen kruis
-                fig.add_hline(y=100, line_dash="dash", line_color="grey")
-                fig.add_vline(x=100, line_dash="dash", line_color="grey") 
-                fig.update_traces(textposition='top center', textfont=dict(size=12, family="Arial Black"))
-                st.plotly_chart(fig, use_container_width=True)
+                if not rrg_df.empty:
+                    rrg_df['Label'] = rrg_df['Ticker'].map(labels).fillna(rrg_df['Ticker'])
+                    
+                    fig = px.scatter(rrg_df, x="RS-Ratio", y="RS-Momentum", 
+                                     color="Kwadrant", text="Label", size="Distance",
+                                     color_discrete_map=COLOR_MAP, height=700,
+                                     title=f"Sectoren t.o.v. {market_cfg['benchmark']}")
+                    
+                    fig.add_hline(y=100, line_dash="dash", line_color="grey")
+                    fig.add_vline(x=100, line_dash="dash", line_color="grey") 
+                    fig.update_traces(textposition='top center', textfont=dict(size=12, family="Arial Black"))
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.error("Kon geen RRG berekenen. Mogelijk dataprobleem.")
             else:
-                st.error("Geen data beschikbaar voor sectoren.")
-    else:
-        st.info("Klik op 'Start Analyse' in de sidebar.")
+                st.error("Geen sector tickers gevonden.")
 
-# === TAB 3: STOCK DETAIL (RELATIEF AAN SECTOR) ===
+# === TAB 3: STOCK DETAIL ===
 with tab3:
     if st.session_state.get('active'):
         current_sec = st.session_state['sector_sel']
         st.subheader(f"Analyse: {current_sec}")
         
-        # 1. Bepaal Benchmark voor Tab 3 (De Sector zelf!)
-        # Als we USA doen en een specifieke sector kiezen, is de ETF de benchmark.
-        # Anders (of bij 'Alle Sectoren') is de marktindex de benchmark.
+        # 1. Benchmark bepalen
         if "USA" in st.session_state['market_key'] and current_sec != "Alle Sectoren":
             sector_benchmark = US_SECTOR_MAP.get(current_sec, market_cfg['benchmark'])
-            st.markdown(f"**Benchmark voor grafiek:** {current_sec} ETF ({sector_benchmark})")
         else:
             sector_benchmark = market_cfg['benchmark']
-            st.markdown(f"**Benchmark voor grafiek:** Hoofdindex ({sector_benchmark})")
 
-        # 2. Haal tickers op
+        # 2. Tickers ophalen (HIER GING HET FOUT)
         constituents = get_market_constituents(st.session_state['market_key'])
-        if current_sec != "Alle Sectoren":
-            stock_tickers = constituents[constituents['Sector'] == current_sec]['Ticker'].tolist()
-        else:
-            stock_tickers = constituents['Ticker'].head(50).tolist() # Limit voor snelheid
-            
-        # Zorg dat de benchmark ook in de download zit
-        download_tickers = list(set(stock_tickers + [sector_benchmark]))
         
-        with st.spinner(f"Koersen laden van {len(download_tickers)} aandelen..."):
-            df_stock_prices = get_price_data(download_tickers)
-            
-            # 3. Bereken RRG (Stocks vs Sector Benchmark)
-            rrg_stocks = calculate_rrg(df_stock_prices, sector_benchmark)
-            
-            # 4. Bereken Signalen (Absolute returns)
-            signals_df = calculate_signals(df_stock_prices)
-            
-            # WEERGAVE
-            if not rrg_stocks.empty:
-                col_graph, col_table = st.columns([3, 2])
-                
-                with col_graph:
-                    st.markdown("##### 📊 Spreidingsdiagram (vs Sector)")
-                    fig2 = px.scatter(rrg_stocks, x="RS-Ratio", y="RS-Momentum", 
-                                     color="Kwadrant", text="Ticker", size="Distance",
-                                     color_discrete_map=COLOR_MAP, height=600)
-                    fig2.add_hline(y=100, line_dash="dash", line_color="grey")
-                    fig2.add_vline(x=100, line_dash="dash", line_color="grey")
-                    fig2.update_traces(textposition='top center')
-                    st.plotly_chart(fig2, use_container_width=True)
-                    
-                with col_table:
-                    st.markdown("##### 📋 Signaal Tabel")
-                    st.dataframe(
-                        signals_df[['Ticker', 'Trend', 'Signaal', '1M %', '3M %']]
-                        .style.applymap(lambda v: 'color: green' if v == 'KOPEN' else '', subset=['Signaal'])
-                        .format({'1M %': '{:.1f}%', '3M %': '{:.1f}%'}),
-                        use_container_width=True, height=600
-                    )
+        # Check of constituents wel geladen is!
+        if constituents.empty:
+            st.error("⚠️ Kon de lijst met aandelen niet laden. Probeer een andere markt of ververs de pagina.")
+        else:
+            if current_sec != "Alle Sectoren":
+                stock_tickers = constituents[constituents['Sector'] == current_sec]['Ticker'].tolist()
             else:
-                st.warning("Onvoldoende data voor deze selectie.")
+                stock_tickers = constituents['Ticker'].head(60).tolist()
+                
+            download_tickers = list(set(stock_tickers + [sector_benchmark]))
+            
+            with st.spinner(f"Koersen laden van {len(download_tickers)} aandelen..."):
+                df_stock_prices = get_price_data(download_tickers)
+                rrg_stocks = calculate_rrg(df_stock_prices, sector_benchmark)
+                signals_df = calculate_signals(df_stock_prices)
+                
+                if not rrg_stocks.empty:
+                    col_graph, col_table = st.columns([3, 2])
+                    
+                    with col_graph:
+                        st.markdown(f"**Benchmark:** {sector_benchmark}")
+                        fig2 = px.scatter(rrg_stocks, x="RS-Ratio", y="RS-Momentum", 
+                                         color="Kwadrant", text="Ticker", size="Distance",
+                                         color_discrete_map=COLOR_MAP, height=600)
+                        fig2.add_hline(y=100, line_dash="dash", line_color="grey")
+                        fig2.add_vline(x=100, line_dash="dash", line_color="grey")
+                        fig2.update_traces(textposition='top center')
+                        st.plotly_chart(fig2, use_container_width=True)
+                        
+                    with col_table:
+                        st.dataframe(
+                            signals_df[['Ticker', 'Trend', 'Signaal', '1M %', '3M %']]
+                            .style.applymap(lambda v: 'color: green' if v == 'KOPEN' else '', subset=['Signaal'])
+                            .format({'1M %': '{:.1f}%', '3M %': '{:.1f}%'}),
+                            use_container_width=True, height=600
+                        )
+                else:
+                    st.warning("Geen data beschikbaar voor deze selectie.")
 
 # === TAB 4: AI ===
 with tab4:
-    st.write("🤖 AI functionaliteit komt in de volgende update.")
+    st.write("🤖 AI functionaliteit volgt.")
