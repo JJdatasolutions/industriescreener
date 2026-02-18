@@ -313,94 +313,126 @@ with tab2:
 # === TAB 3: AANDELEN ===
 with tab3:
     if st.session_state.get('active'):
-        current_sec = st.session_state.get('sector_sel', 'Alle Sectoren') # Veilige get
+        current_sec = st.session_state.get('sector_sel', 'Alle Sectoren')
         st.subheader(f"Deep Dive: {current_sec}")
         
-        # 1. Bepaal Benchmark voor deze selectie
+        # 1. Benchmark & Tickers
         if "USA" in st.session_state['market_key'] and current_sec != "Alle Sectoren":
             bench_ticker = US_SECTOR_MAP.get(current_sec, market_cfg['benchmark'])
         else:
             bench_ticker = market_cfg['benchmark']
         
-        # 2. Haal tickers op
         constituents = get_market_constituents(st.session_state['market_key'])
         
         if not constituents.empty:
-            # Filter op sector of pak top 60 (om performance te sparen)
             if current_sec != "Alle Sectoren":
                 subset = constituents[constituents['Sector'] == current_sec]['Ticker'].tolist()
             else:
-                subset = constituents['Ticker'].head(60).tolist() # Limiet om laadtijd te beperken
+                subset = constituents['Ticker'].head(60).tolist()
             
-            # Voeg benchmark toe aan de lijst en ontdubbel
             dl_list = list(set(subset + [bench_ticker]))
             
             st.info(f"Koersdata ophalen voor {len(dl_list)} aandelen... even geduld.")
 
-            # 3. Download Data
+            # 2. Data ophalen en berekenen
             df_stocks = get_price_data(dl_list)
-            
-            # DEBUG: Check of data binnenkomt
-            if df_stocks.empty:
-                st.error("❌ Geen koersdata ontvangen van Yahoo Finance. Probeer het later opnieuw.")
-                st.stop()
-            
-            # Opslaan in state
             st.session_state['df_stocks_raw'] = df_stocks 
             st.session_state['bench_ticker_t3'] = bench_ticker
             
-            # 4. Bereken RRG
             rrg_stocks = calculate_rrg_extended(df_stocks, bench_ticker)
             
             if not rrg_stocks.empty:
-                # Cleaning voor plotten
+                # Cleaning
                 rrg_stocks = rrg_stocks.dropna(subset=['RS-Ratio', 'RS-Momentum', 'Distance', 'Kwadrant'])
                 rrg_stocks = rrg_stocks[rrg_stocks['Distance'] > 0]
-                
-                # Sla op voor Tab 4
                 st.session_state['rrg_stocks_data'] = rrg_stocks 
                 
-                # --- HIER GING HET MIS: DE LAYOUT ---
                 col1, col2 = st.columns([3, 1])
                 
                 with col1:
-                    st.markdown("### 🧭 Relative Rotation Graph")
-                    fig2 = px.scatter(rrg_stocks, x="RS-Ratio", y="RS-Momentum", 
-                                      color="Kwadrant", text="Ticker", size="Distance",
-                                      color_discrete_map=COLOR_MAP, height=650,
-                                      hover_data=["Heading", "Power_Heading"],
-                                      title=f"RRG: {current_sec} vs {bench_ticker}")
+                    st.markdown("### 🧭 Relative Rotation Graph (Hittekaart)")
                     
-                    # Assen en lijnen
-                    fig2.add_hline(y=100, line_dash="dash", line_color="grey")
-                    fig2.add_vline(x=100, line_dash="dash", line_color="grey")
-                    fig2.add_shape(type="rect", x0=100, y0=100, x1=105, y1=105, 
-                                   line=dict(color="RoyalBlue", width=0), fillcolor="rgba(0,0,255,0.1)")
+                    # --- NIEUWE GRAFIEK LOGICA ---
                     
-                    fig2.update_traces(textposition='top center')
+                    # We gebruiken 'Heading' voor de kleur van de punten
+                    # We gebruiken een custom colorscale: Rood (0-90) -> Blauw -> Groen (180-270)
+                    # Omdat Heading 0-360 is, gebruiken we een circulaire schaal (HSV of specifieke Gradient)
                     
-                    # BELANGRIJKSTE REGEL: TEKEN DE GRAFIEK
+                    fig2 = px.scatter(
+                        rrg_stocks, 
+                        x="RS-Ratio", 
+                        y="RS-Momentum", 
+                        color="Heading",  # De kleur wordt bepaald door de hoek
+                        text="Ticker", 
+                        size="Distance",
+                        # 'hsv' is een regenboog schaal. Rood zit rond 0/360 (Noord), Groen rond 120, Blauw rond 240.
+                        # Dit zorgt ervoor dat NO (0-90) Rood/Oranje is (Power) en ZW (200+) Koel/Groen/Blauw.
+                        color_continuous_scale="hsv", 
+                        height=650,
+                        hover_data=["Power_Heading"],
+                        title=f"RRG: {current_sec} vs {bench_ticker}"
+                    )
+                    
+                    # Zwarte rand om de bolletjes zodat ze opvallen
+                    fig2.update_traces(
+                        marker=dict(line=dict(width=1, color='black'), opacity=1),
+                        textposition='top center'
+                    )
+                    
+                    # --- ACHTERGROND KLEUREN (KWADRANTEN) ---
+                    # We voegen 4 gekleurde vlakken toe aan de achtergrond
+                    # De ranges (0-100 en 100-200) zijn arbitrair maar dekken meestal de hele plot
+                    
+                    # 1. LEADING (Rechtsboven) - Groenachtig
+                    fig2.add_shape(type="rect", x0=100, y0=100, x1=200, y1=200, 
+                                   fillcolor="rgba(0, 100, 0, 0.1)", line=dict(width=0), layer="below")
+                    
+                    # 2. WEAKENING (Rechtsonder) - Oranjeachtig
+                    fig2.add_shape(type="rect", x0=100, y0=0, x1=200, y1=100, 
+                                   fillcolor="rgba(255, 165, 0, 0.1)", line=dict(width=0), layer="below")
+                    
+                    # 3. LAGGING (Linksonder) - Roodachtig
+                    fig2.add_shape(type="rect", x0=0, y0=0, x1=100, y1=100, 
+                                   fillcolor="rgba(220, 20, 60, 0.1)", line=dict(width=0), layer="below")
+                    
+                    # 4. IMPROVING (Linksboven) - Blauwachtig
+                    fig2.add_shape(type="rect", x0=0, y0=100, x1=100, y1=200, 
+                                   fillcolor="rgba(173, 216, 230, 0.2)", line=dict(width=0), layer="below")
+
+                    # Assenlijnen (Kruis in het midden)
+                    fig2.add_hline(y=100, line_dash="solid", line_color="black", line_width=1)
+                    fig2.add_vline(x=100, line_dash="solid", line_color="black", line_width=1)
+                    
+                    # Fix voor de assen: zorg dat het kruis altijd in het midden staat
+                    # We berekenen de max afwijking zodat 100,100 centert
+                    max_dev = max(abs(rrg_stocks['RS-Ratio']-100).max(), abs(rrg_stocks['RS-Momentum']-100).max()) * 1.1
+                    fig2.update_xaxes(range=[100-max_dev, 100+max_dev], showgrid=False)
+                    fig2.update_yaxes(range=[100-max_dev, 100+max_dev], showgrid=False)
+
                     st.plotly_chart(fig2, use_container_width=True)
 
                 with col2:
-                    st.markdown("### 🏆 Leaders")
-                    # Toon lijstje van beste aandelen (North-East corner)
+                    st.markdown("### 🏆 Power Headings")
+                    st.caption("Aandelen die met kracht naar Noordoost (Rood/Oranje) bewegen.")
+                    # Filter op Power Heading (0-90 graden)
                     leaders = rrg_stocks[
-                        (rrg_stocks['Kwadrant'] == "1. LEADING") & 
                         (rrg_stocks['Power_Heading'] == "✅ YES")
-                    ].sort_values('Distance', ascending=False).head(10)
+                    ].sort_values('Distance', ascending=False).head(15)
                     
                     if not leaders.empty:
-                        st.dataframe(leaders[['Ticker', 'Distance']], hide_index=True)
+                        st.dataframe(
+                            leaders[['Ticker', 'Heading', 'Distance']].style.background_gradient(subset=['Distance'], cmap='Reds'),
+                            hide_index=True
+                        )
                     else:
                         st.write("Geen sterke leaders gevonden.")
 
             else:
-                st.warning("⚠️ Wel koersdata, maar onvoldoende historie voor RRG berekening (minimaal 100 dagen nodig).")
+                st.warning("⚠️ Onvoldoende data voor plot.")
         else:
-            st.error("Kon geen aandelenlijst ophalen (Wikipedia error & Fallback faalde).")
+            st.error("Kon geen aandelenlijst ophalen.")
     else:
-        st.info("👈 Klik in de zijbalk op '🚀 Start Analyse' om te beginnen.")
+        st.info("👈 Start de analyse in de zijbalk.")
 # === TAB 4: AI ANALYST ===
 with tab4:
     st.header("🧠 AI-Agent Prompt Generator")
