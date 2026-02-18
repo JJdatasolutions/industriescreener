@@ -300,24 +300,27 @@ with tab3:
                 rrg_stocks = calculate_rrg_extended(df_stocks, bench_ticker)
                 
                 if not rrg_stocks.empty:
+                    # --- FIX START: Data opschonen voor Plotly ---
+                    # 1. Verwijder rijen waar data ontbreekt (NaN)
+                    rrg_stocks = rrg_stocks.dropna(subset=['RS-Ratio', 'RS-Momentum', 'Distance', 'Kwadrant'])
+                    
+                    # 2. Zorg dat Distance groter is dan 0 (Plotly crasht op size=0 of NaN)
+                    rrg_stocks = rrg_stocks[rrg_stocks['Distance'] > 0]
+                    
+                    # 3. Check of er nog data over is na het filteren
+                    if rrg_stocks.empty:
+                        st.warning("Geen geldige data overgebleven na filtering.")
+                        st.stop()
+                    # --- FIX END ---
+
                     st.session_state['rrg_stocks_data'] = rrg_stocks # Opslaan voor Tab 4
                     
                     col1, col2 = st.columns([3, 1])
                     with col1:
                         fig2 = px.scatter(rrg_stocks, x="RS-Ratio", y="RS-Momentum", 
-                                         color="Kwadrant", text="Ticker", size="Distance",
-                                         color_discrete_map=COLOR_MAP, height=600,
-                                         hover_data=["Heading", "Power_Heading"])
-                        fig2.add_hline(y=100, line_dash="dash", line_color="grey")
-                        fig2.add_vline(x=100, line_dash="dash", line_color="grey")
-                        st.plotly_chart(fig2, use_container_width=True)
-                    
-                    with col2:
-                        st.markdown("##### 🏆 Top Momentum (Northeast)")
-                        # Filter op Power Heading
-                        top_picks = rrg_stocks[rrg_stocks['Power_Heading'] == "✅ YES"].sort_values('Distance', ascending=False).head(10)
-                        st.dataframe(top_picks[['Ticker', 'Distance']], hide_index=True)
-
+                                          color="Kwadrant", text="Ticker", size="Distance",
+                                          color_discrete_map=COLOR_MAP, height=600,
+                                          hover_data=["Heading", "Power_Heading"])
 # === TAB 4: AI ANALYST ===
 with tab4:
     st.header("🧠 AI-Agent Prompt Generator")
