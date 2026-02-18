@@ -51,9 +51,8 @@ COLOR_MAP = {
 def get_market_constituents(market_key):
     mkt = MARKETS[market_key]
     
-    # ... (EU_MIX logica blijft hetzelfde, mag je laten staan) ...
+    # 1. EU LOGICA (Blijft hetzelfde)
     if "EU_MIX" in mkt.get("code", ""):
-        # [Je bestaande EU_MIX code hier...]
         data = {
             "ASML.AS": "Technology", "UNA.AS": "Consumer Staples", "HEIA.AS": "Consumer Staples", 
             "SHELL.AS": "Energy", "INGA.AS": "Financials", "DSM.AS": "Materials", 
@@ -65,33 +64,64 @@ def get_market_constituents(market_key):
         }
         return pd.DataFrame(list(data.items()), columns=['Ticker', 'Sector'])
 
+    # 2. USA SCRAPER (Met Fallback)
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        tables = pd.read_html(requests.get(mkt['wiki'], headers=headers).text)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        # Probeer Wikipedia op te halen
+        response = requests.get(mkt['wiki'], headers=headers, timeout=5)
+        response.raise_for_status() # Check op HTTP fouten (bijv. 429 Too Many Requests)
+        
+        tables = pd.read_html(response.text)
         target_df = pd.DataFrame()
+        
+        # Slimmer zoeken naar de juiste tabel
         for df in tables:
             cols = [str(c).lower() for c in df.columns]
-            if any("symbol" in c for c in cols) and any("sector" in c for c in cols):
+            # Zoek specifiek naar GICS Sector OF Sector
+            if any("symbol" in c for c in cols) and (any("gics sector" in c for c in cols) or any("sector" in c for c in cols)):
                 target_df = df
                 break
         
-        if target_df.empty: return pd.DataFrame()
+        if target_df.empty:
+            raise ValueError("Geen geschikte tabel gevonden op Wikipedia.")
 
+        # Kolommen identificeren
         ticker_col = next(c for c in target_df.columns if "Symbol" in str(c) or "Ticker" in str(c))
-        sector_col = next(c for c in target_df.columns if "Sector" in str(c))
+        # Pak voorkeur voor 'GICS Sector', anders 'Sector'
+        sector_col_candidates = [c for c in target_df.columns if "Sector" in str(c)]
+        sector_col = sector_col_candidates[0] # Pak de eerste match
         
         df_clean = target_df[[ticker_col, sector_col]].copy()
         df_clean.columns = ['Ticker', 'Sector']
         df_clean['Ticker'] = df_clean['Ticker'].str.replace('.', '-', regex=False)
         
-        # --- FIX: Maak robuuster ---
-        # Verwijder spaties voor/achter en zet om naar string
+        # Schoonmaken
         df_clean['Sector'] = df_clean['Sector'].astype(str).str.strip()
         
+        # Check of we data hebben, zo niet: forceer error om naar fallback te gaan
+        if df_clean.empty: raise ValueError("Lege dataset na cleaning.")
+            
         return df_clean
-    except:
-        return pd.DataFrame()
 
+    except Exception as e:
+        # 3. FALLBACK MECHANISME (Als Wikipedia faalt)
+        # Dit zorgt ervoor dat je app ALTIJD werkt, zelfs zonder internetverbinding naar Wiki
+        st.warning(f"⚠️ Wikipedia data niet beschikbaar ({e}). Gebruik nood-dataset (Top 30 US Stocks).")
+        
+        fallback_data = {
+            'AAPL': 'Information Technology', 'MSFT': 'Information Technology', 'NVDA': 'Information Technology',
+            'AMZN': 'Consumer Discretionary', 'GOOGL': 'Communication Services', 'META': 'Communication Services',
+            'TSLA': 'Consumer Discretionary', 'BRK-B': 'Financials', 'LLY': 'Health Care', 'AVGO': 'Information Technology',
+            'JPM': 'Financials', 'V': 'Financials', 'XOM': 'Energy', 'UNH': 'Health Care',
+            'PG': 'Consumer Staples', 'MA': 'Financials', 'JNJ': 'Health Care', 'HD': 'Consumer Discretionary',
+            'MRK': 'Health Care', 'COST': 'Consumer Staples', 'ABBV': 'Health Care', 'AMD': 'Information Technology',
+            'CRM': 'Information Technology', 'NFLX': 'Communication Services', 'PEP': 'Consumer Staples',
+            'KO': 'Consumer Staples', 'BAC': 'Financials', 'WMT': 'Consumer Staples', 'CVX': 'Energy',
+            'ADBE': 'Information Technology'
+        }
+        return pd.DataFrame(list(fallback_data.items()), columns=['Ticker', 'Sector'])
 @st.cache_data(ttl=3600)
 def get_price_data(tickers):
     if not tickers: return pd.DataFrame()
