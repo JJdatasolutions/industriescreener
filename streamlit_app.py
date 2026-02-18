@@ -139,13 +139,10 @@ def get_price_data(tickers):
         return data
     except: return pd.DataFrame()
 
-def calculate_rrg_extended(df, benchmark_ticker, market_bullish=True):
+def calculate_rrg_extended(df, benchmark_ticker):
     """
-    QUANT ENGINE 2.0:
-    Berekent RRG vectoren en genereert een 'Alpha Power Score' op basis van:
-    1. Heading Precision (Hoe dicht bij 45 graden?)
-    2. Vector Magnitude (Distance)
-    3. Quadrant Potential (Lagging > Leading transitie bonus)
+    RRG + Heading (Hoek) berekening - GECORRIGEERD
+    Heading is nu gebaseerd op BEWEGING (Velocity), niet op positie.
     """
     if df.empty or benchmark_ticker not in df.columns: return pd.DataFrame()
     
@@ -155,95 +152,56 @@ def calculate_rrg_extended(df, benchmark_ticker, market_bullish=True):
     for ticker in df.columns:
         if ticker == benchmark_ticker: continue
         try:
-            # --- A. BASIS RRG BEREKENING (JdK Formule) ---
             rs = df[ticker] / bench_series
-            rs_ma = rs.rolling(100).mean() # JdK Standaard
+            rs_ma = rs.rolling(100).mean()
             rs_ratio = 100 * (rs / rs_ma)
-            rs_mom = 100 * (rs_ratio / rs_ratio.shift(10)) # Momentum van de Ratio
+            rs_mom = 100 * (rs_ratio / rs_ratio.shift(10))
             
+            # We hebben minstens 2 punten nodig om een richting te bepalen
             if len(rs_ratio) < 2: continue
             
-            # Huidige en Vorige punten (t en t-1)
-            curr_r, curr_m = rs_ratio.iloc[-1], rs_mom.iloc[-1]
-            prev_r, prev_m = rs_ratio.iloc[-2], rs_mom.iloc[-2]
+            curr_r = rs_ratio.iloc[-1]
+            curr_m = rs_mom.iloc[-1]
+            prev_r = rs_ratio.iloc[-2]  # De waarde van gisteren/vorige periode
+            prev_m = rs_mom.iloc[-2]
             
-            # --- B. WETENSCHAPPELIJKE VECTOR ANALYSE ---
+            # --- KWANTITATIEVE UPDATE: Heading & Distance ---
             
-            # 1. Velocity Vector (De daadwerkelijke beweging)
+            # 1. Distance (Euclidisch vanaf centrum 100,100) - Dit blijft positie!
+            dist = np.sqrt((curr_r - 100)**2 + (curr_m - 100)**2)
+            
+            # 2. Heading (Hoek van de BEWEGING)
+            # We kijken naar de vector: waar kwamen we vandaan -> waar zijn we nu?
             dx = curr_r - prev_r
             dy = curr_m - prev_m
             
-            # 2. Heading (Hoek in graden, 0 = Oost, 90 = Noord)
-            # atan2 geeft de hoek van de vector (dx, dy)
-            heading_rad = math.atan2(dy, dx)
-            heading_deg = math.degrees(heading_rad)
-            if heading_deg < 0: heading_deg += 360
-            
-            # 3. Distance (Euclidische afstand tot oorsprong 100,100)
-            # Filtert ruis: lage distance = geen significante relatieve trend
-            dist = np.sqrt((curr_r - 100)**2 + (curr_m - 100)**2)
-            
-            # --- C. ALPHA POWER SCORE ALGORITME ---
-            
-            # Criterium 1: De 'Sweet Spot' (45 graden)
-            # We berekenen een score van 0.0 tot 1.0 voor de hoek.
-            # 45 graden = 1.0 (Perfect). 
-            # 0 of 90 graden = 0.5 (Grensgevallen).
-            # Buiten 0-90 = 0.0 (Strafpunten).
-            
-            if 0 <= heading_deg <= 90:
-                # Hoe dichter bij 45, hoe hoger de score.
-                # Afwijking van 45:
-                dev = abs(heading_deg - 45)
-                # Normaliseer: max afwijking is 45. Score = 1 - (afwijking / 45)
-                heading_score = 1.0 - (dev / 45.0)
+            # Als er geen beweging is, is de hoek 0 (of ongedefinieerd, hier vangen we dat op)
+            if dx == 0 and dy == 0:
+                heading_deg = 0
             else:
-                heading_score = 0.0 # Geen Alpha potentieel buiten NE kwadrant
-                
-            # Criterium 2: Quadrant Bonus (Lagging to Improving)
-            # Onderzoek toont aan dat 'Leading' soms te laat is.
-            # We geven een bonus als een aandeel in Lagging (linksboven/linksonder) zit
-            # MAAR wel een sterke Heading (0-90) heeft. Dit is de "Turnaround".
+                heading_rad = math.atan2(dy, dx)
+                heading_deg = math.degrees(heading_rad)
+                if heading_deg < 0: heading_deg += 360
             
-            kwadrant = ""
-            if curr_r > 100 and curr_m > 100: kwadrant = "1. LEADING"
-            elif curr_r < 100 and curr_m > 100: kwadrant = "4. IMPROVING"
-            elif curr_r < 100 and curr_m < 100: kwadrant = "3. LAGGING"
-            else: kwadrant = "2. WEAKENING"
+            # Bepaal 'Power Heading' (0-90 graden is North-East = Winstgevende richting)
+            # Dit kan nu dus OOK gebeuren als een aandeel linksboven of linksonder staat!
+            is_power_heading = 0 <= heading_deg <= 90
             
-            q_multiplier = 1.0
-            if kwadrant == "3. LAGGING" and heading_score > 0.5:
-                q_multiplier = 1.2 # 20% Bonus voor vroege ontdekkingen
-            
-            # Criterium 3: Distance Weight
-            # Een perfecte hoek met distance 0.1 zegt niets.
-            # We wegen de score met de log van de distance (om extremen te dempen)
-            
-            # Formule: (Heading Kwaliteit * Distance Kracht * Bonus)
-            raw_power_score = (heading_score * 100) * (np.log1p(dist)) * q_multiplier
-            
-            # --- D. MARKT REGIME FILTER ---
-            # Als de markt BEAR is, zijn we véél strenger.
-            action = "WAIT"
-            if market_bullish:
-                if heading_score > 0.6 and dist > 1.5: action = "BUY"
-                elif heading_score > 0.3: action = "WATCH"
-            else:
-                # In Bear market alleen kopen als signaal extreem sterk is
-                if heading_score > 0.8 and dist > 3.0: action = "SPEC BUY"
-                elif heading_deg > 180 and heading_deg < 270: action = "SHORT" # SW hoek
+            # Kwadrant bepaling (blijft gebaseerd op positie)
+            if curr_r > 100 and curr_m > 100: status = "1. LEADING"
+            elif curr_r < 100 and curr_m > 100: status = "4. IMPROVING"
+            elif curr_r < 100 and curr_m < 100: status = "3. LAGGING"
+            else: status = "2. WEAKENING"
             
             rrg_data.append({
                 'Ticker': ticker,
                 'RS-Ratio': curr_r,
                 'RS-Momentum': curr_m,
-                'Kwadrant': kwadrant,
+                'Kwadrant': status,
                 'Distance': dist,
                 'Heading': heading_deg,
-                'Alpha_Score': round(raw_power_score, 2),
-                'Action': action
+                'Power_Heading': "✅ YES" if is_power_heading else "❌ NO"
             })
-            
         except: continue
         
     return pd.DataFrame(rrg_data)
@@ -317,7 +275,7 @@ with tab1:
     * 🍏 **IMPROVING:** Zwakke trend, toenemend momentum. (Speculative Buy)
     """)
 
-# === TAB 2: SECTOREN (Gecorrigeerd: RGBA kleuren fix) ===
+# === TAB 2: SECTOREN ===
 with tab2:
     if st.session_state.get('active'):
         st.subheader("Sector Rotatie")
@@ -326,44 +284,43 @@ with tab2:
         with st.spinner("Sectoren analyseren..."):
             tickers = list(US_SECTOR_MAP.values()) if "USA" in st.session_state['market_key'] else []
             
-            # Fallback
+            # Fallback voor EU of als map leeg is
             if not tickers: 
                  constituents = get_market_constituents(st.session_state['market_key'])
                  tickers = constituents['Ticker'].head(15).tolist() if not constituents.empty else []
 
             if tickers:
-                # Benchmark toevoegen
+                # Benchmark toevoegen voor berekening
                 calc_tickers = list(set(tickers + [market_cfg['benchmark']]))
                 df_sec = get_price_data(calc_tickers)
-                
-                # Check marktregime voor de functie
-                market_bull = True
-                if market_cfg['benchmark'] in df_sec.columns:
-                    b_series = df_sec[market_cfg['benchmark']]
-                    market_bull = b_series.iloc[-1] > b_series.rolling(200).mean().iloc[-1]
-
-                # BEREKENING (Met de NIEUWE functie)
-                rrg_sec = calculate_rrg_extended(df_sec, market_cfg['benchmark'], market_bullish=market_bull)
+                rrg_sec = calculate_rrg_extended(df_sec, market_cfg['benchmark'])
                 
                 if not rrg_sec.empty:
                     # 2. Labels en Cleaning
+                    # We maken een mooie naam (bijv 'Technology') ipv de ticker (XLK)
                     labels = {v: k for k, v in US_SECTOR_MAP.items()}
-                    # Map de ticker naar de naam
+                    # Map de ticker naar de naam, als die niet bestaat, gebruik de ticker
                     rrg_sec['Label'] = rrg_sec['Ticker'].map(labels).fillna(rrg_sec['Ticker'])
                     
-                    # Filter
+                    # Filter: Alleen de opgevraagde tickers (excl benchmark zelf soms)
                     rrg_sec = rrg_sec[rrg_sec['Ticker'].isin(tickers)]
                     rrg_sec = rrg_sec[rrg_sec['Distance'] > 0]
 
-                    # 3. Visualisatie
+                    # 3. Visualisatie (Exacte kopie van Tab 3 stijl)
                     
-                    # Kleurenschaal
+                    # --- CUSTOM COLOR SCALE ---
+                    # 0-90 = Groen (met 45 als piek). >90 = Rood.
                     custom_color_scale = [
-                        (0.00, "#e5e7eb"),  # 0°
-                        (0.125, "#00ff00"), # 45°  : FEL GROEN (Max Power)
-                        (0.25, "#10b981"),  # 90°
-                        (0.26, "#fca5a5"),  # >90° : Rood gebied start
-                        (1.00, "#450a0a")   # 360°
+                        # GROENE ZONE (0 - 90)
+                        (0.00, "#a7f3d0"),  # 0°   : Lichtgroen
+                        (0.125, "#065f46"), # 45°  : DONKERGROEN (Sweet Spot)
+                        (0.25, "#a7f3d0"),  # 90°  : Lichtgroen
+                        
+                        # RODE ZONE (91 - 360)
+                        (0.2501, "#fca5a5"), # 90.1°: Lichtrood
+                        (0.50, "#dc2626"),   # 180° : Rood
+                        (0.75, "#991b1b"),   # 270° : Donker Rood
+                        (1.00, "#450a0a")    # 360° : Zwart/Rood
                     ]
 
                     fig = px.scatter(
@@ -371,67 +328,69 @@ with tab2:
                         x="RS-Ratio", 
                         y="RS-Momentum", 
                         color="Heading", 
-                        text="Label",  # Sector naam
-                        size="Alpha_Score", # Grootte = Kracht
+                        text="Label",  # Gebruik de leesbare Sector naam
+                        size="Distance",
                         height=650,
-                        hover_data=["Kwadrant", "Action", "Distance"],
-                        title=f"<b>SECTOR ROTATIE</b> <br><sup>Focus op 45° (Fel Groen) | Grootte bol = Alpha Score</sup>"
+                        hover_data=["Kwadrant", "Power_Heading"],
+                        title=f"<b>SECTOR ROTATIE</b> <br><sup>Focus op 45° (Donkergroen) | Vermijd Rood</sup>"
                     )
                     
                     # STYLING
                     fig.update_traces(
-                        marker=dict(line=dict(width=1, color='black'), opacity=0.9),
+                        marker=dict(
+                            line=dict(width=1, color='black'), 
+                            opacity=0.9
+                        ),
                         textposition='top center',
-                        textfont=dict(size=11, color='darkslategrey', family="Arial Black")
+                        textfont=dict(size=11, color='darkslategrey', family="Arial Black") # Iets dikkere tekst voor sectoren
                     )
                     
+                    # LAYOUT & KLEURENKAART
                     fig.update_layout(
-                        coloraxis_cmin=0, coloraxis_cmax=360,
+                        coloraxis_cmin=0,
+                        coloraxis_cmax=360,
                         coloraxis_colorscale=custom_color_scale,
                         coloraxis_colorbar=dict(
                             title="Richting",
-                            tickvals=[0, 45, 90, 225],
-                            ticktext=["0°", "45° (TOP)", "90°", "SW (Short)"]
+                            tickvals=[0, 45, 90, 180, 270],
+                            ticktext=["0°", "45° TOP", "90° Grens", "180°", "270°"]
                         ),
                         template="plotly_white",
-                        xaxis=dict(showgrid=True, zeroline=True, zerolinecolor='black'), 
-                        yaxis=dict(showgrid=True, zeroline=True, zerolinecolor='black'),
+                        xaxis=dict(showgrid=True, gridcolor='#f2f2f2', zeroline=False), 
+                        yaxis=dict(showgrid=True, gridcolor='#f2f2f2', zeroline=False),
+                        plot_bgcolor='white',
+                        paper_bgcolor='white',
                         margin=dict(t=60, b=40, l=40, r=40)
                     )
                     
-                    # --- DE FIX ZIT HIER (Watermerken) ---
-                    # Gebruik rgba(R, G, B, Alpha) in plaats van opacity parameter
+                    # Watermerken & Assen
+                    fig.add_hline(y=100, line_color="black", line_width=1)
+                    fig.add_vline(x=100, line_color="black", line_width=1)
                     
-                    fig.add_annotation(
-                        x=101, y=101, 
-                        text="LEADING", 
-                        showarrow=False, 
-                        font=dict(size=14, color="rgba(0, 128, 0, 0.3)") # Groen met 0.3 transparantie
-                    )
-                    
-                    fig.add_annotation(
-                        x=99, y=99, 
-                        text="LAGGING", 
-                        showarrow=False, 
-                        font=dict(size=14, color="rgba(255, 0, 0, 0.3)") # Rood met 0.3 transparantie
-                    )
+                    # Visuele tekst annotaties
+                    fig.add_annotation(x=101, y=101, text="BUY ZONE", showarrow=False, font=dict(size=14, color="#065f46"))
+                    fig.add_annotation(x=99, y=99, text="AVOID", showarrow=False, font=dict(size=14, color="#991b1b"))
 
-                    # Centreren
+                    # Centreren van de grafiek
                     max_dev = max(abs(rrg_sec['RS-Ratio']-100).max(), abs(rrg_sec['RS-Momentum']-100).max()) * 1.1
                     fig.update_xaxes(range=[100-max_dev, 100+max_dev])
                     fig.update_yaxes(range=[100-max_dev, 100+max_dev])
 
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    # --- MINI TABEL ---
-                    st.markdown("#### 🏆 Sector Ranking (Alpha Score)")
+                    # --- MINI TABEL (Optioneel maar handig) ---
+                    # Toon snel de beste sectoren onder de grafiek
+                    st.markdown("#### 🏆 Sector Ranking (Dichtst bij 45°)")
+                    df_view = rrg_sec.copy()
+                    df_view['Afwijking_45'] = abs(df_view['Heading'] - 45)
                     
-                    top_sec = rrg_sec.sort_values('Alpha_Score', ascending=False)
+                    # Sorteer op beste heading (dichtst bij 45)
+                    top_sec = df_view.sort_values('Afwijking_45', ascending=True)
                     
                     st.dataframe(
-                        top_sec[['Label', 'Alpha_Score', 'Heading', 'Action']].style
-                        .background_gradient(subset=['Alpha_Score'], cmap='Greens')
-                        .format({"Heading": "{:.0f}°", "Alpha_Score": "{:.1f}"}),
+                        top_sec[['Label', 'Heading', 'Distance', 'Kwadrant']].style
+                        .background_gradient(subset=['Heading'], cmap='Greens', vmin=0, vmax=90)
+                        .format({"Heading": "{:.1f}°", "Distance": "{:.2f}"}),
                         hide_index=True,
                         use_container_width=True
                     )
@@ -442,26 +401,13 @@ with tab2:
                 st.warning("Geen tickers gevonden voor deze markt.")
 import plotly.graph_objects as go # We hebben de low-level API nodig voor custom styling
 
-# === TAB 3: AANDELEN (QUANT RANKING) ===
+# === TAB 3: AANDELEN ===
 with tab3:
     if st.session_state.get('active'):
         current_sec = st.session_state.get('sector_sel', 'Alle Sectoren')
         st.subheader(f"Deep Dive: {current_sec}")
         
-        # 1. Market Context Ophalen (voor het filter)
-        # We halen de status van de benchmark op die in de sidebar is berekend
-        # (Aanname: sma200 variabele uit sidebar is beschikbaar of we herberekenen snel)
-        market_bull = True
-        if 'df_stocks_raw' in st.session_state: # Check benchmark in raw data
-             # Simpele check opnieuw om zeker te zijn
-             bench_ticker = market_cfg['benchmark']
-             if bench_ticker in st.session_state['df_stocks_raw']:
-                 b_series = st.session_state['df_stocks_raw'][bench_ticker]
-                 market_bull = b_series.iloc[-1] > b_series.rolling(200).mean().iloc[-1]
-        
-        st.caption(f"Market Regime Filter: {'🟢 BULL (Aggressive)' if market_bull else '🔴 BEAR (Defensive)'}")
-
-        # 2. Setup Data
+        # 1. Setup Data
         if "USA" in st.session_state['market_key'] and current_sec != "Alle Sectoren":
             bench_ticker = US_SECTOR_MAP.get(current_sec, market_cfg['benchmark'])
         else:
@@ -484,26 +430,39 @@ with tab3:
                  st.session_state['df_stocks_raw'] = df_stocks
             else:
                  df_stocks = st.session_state['df_stocks_raw']
+            st.session_state['bench_ticker_t3'] = bench_ticker
             
-            # --- 3. BEREKENING MET NIEUWE LOGICA ---
-            rrg_stocks = calculate_rrg_extended(df_stocks, bench_ticker, market_bullish=market_bull)
+            # Bereken RRG
+            rrg_stocks = calculate_rrg_extended(df_stocks, bench_ticker)
             
             if not rrg_stocks.empty:
+                # Cleaning
+                rrg_stocks = rrg_stocks.dropna(subset=['RS-Ratio', 'RS-Momentum', 'Distance', 'Kwadrant'])
+                rrg_stocks = rrg_stocks[rrg_stocks['Distance'] > 0]
                 st.session_state['rrg_stocks_data'] = rrg_stocks 
                 
                 col1, col2 = st.columns([3, 1])
                 
                 with col1:
-                    st.markdown("### 🧭 Alpha Power Map")
+                    st.markdown("### 🧭 Relative Rotation Graph")
                     
-                    # KLEUREN SCHAAL UPDATE
-                    # We gebruiken dezelfde logica: 45 graden is de piek.
+                    # --- CUSTOM COLOR SCALE (De 'Sweet Spot' Logica) ---
+                    # 0-360 graden gemapt naar 0.0-1.0
+                    # 45 graden = 0.125
+                    # 90 graden = 0.25
+                    
                     custom_color_scale = [
-                        (0.00, "#e5e7eb"),  # 0°   : Grijs/Groen start
-                        (0.125, "#00ff00"), # 45°  : FEL GROEN (Max Power)
-                        (0.25, "#10b981"),  # 90°  : Donkergroen
-                        (0.26, "#fca5a5"),  # >90° : Rood gebied start
-                        (1.00, "#450a0a")   # 360° : Donker Rood
+                        # DEEL 1: DE GROENE ZONE (0 - 90)
+                        (0.00, "#a7f3d0"),  # 0°   : Lichtgroen (Start Leading)
+                        (0.125, "#065f46"), # 45°  : DONKERGROEN (De Sweet Spot - Max Power)
+                        (0.25, "#a7f3d0"),  # 90°  : Lichtgroen (Einde Leading)
+                        
+                        # DEEL 2: DE RODE ZONE (91 - 360)
+                        # We maken een harde overgang direct na 90 (0.25)
+                        (0.2501, "#fca5a5"), # 90.1°: Lichtrood (Start Zwakte)
+                        (0.50, "#dc2626"),   # 180° : Rood
+                        (0.75, "#991b1b"),   # 270° : Donkerder Rood
+                        (1.00, "#450a0a")    # 360° : Zeer Donker Rood/Zwart
                     ]
 
                     fig2 = px.scatter(
@@ -512,30 +471,49 @@ with tab3:
                         y="RS-Momentum", 
                         color="Heading", 
                         text="Ticker", 
-                        size="Alpha_Score", # Grootte is nu gebaseerd op de berekende kwaliteit
+                        size="Distance",
                         height=700,
-                        hover_data=["Kwadrant", "Action", "Distance"],
-                        title=f"<b>RRG SIGNAL: {current_sec}</b>"
+                        hover_data=["Kwadrant"],
+                        title=f"<b>RRG SIGNAL: {current_sec}</b> <br><sup>Focus op 45° (Donkergroen) | Vermijd Rood</sup>"
                     )
                     
-                    fig2.update_traces(marker=dict(line=dict(width=1, color='black'), opacity=0.85))
+                    # Styling
+                    fig2.update_traces(
+                        marker=dict(
+                            line=dict(width=1, color='black'), 
+                            opacity=0.85
+                        ),
+                        textposition='top center',
+                        textfont=dict(size=10, color='darkslategrey')
+                    )
+                    
+                    # Forceer de kleurenkaart exact over 0-360
                     fig2.update_layout(
-                        coloraxis_cmin=0, coloraxis_cmax=360,
+                        coloraxis_cmin=0,
+                        coloraxis_cmax=360,
                         coloraxis_colorscale=custom_color_scale,
                         coloraxis_colorbar=dict(
-                            title="Vector Heading",
-                            tickvals=[0, 45, 90, 225],
-                            ticktext=["0° (E)", "45° (NE)", "90° (N)", "225° (SW)"]
+                            title="Richting",
+                            tickvals=[0, 45, 90, 180, 270],
+                            ticktext=["Start", "45° TOP", "90° Grens", "180°", "270°"]
                         ),
                         template="plotly_white",
-                        xaxis=dict(showgrid=True, zeroline=True, zerolinecolor='black'), 
-                        yaxis=dict(showgrid=True, zeroline=True, zerolinecolor='black')
+                        xaxis=dict(showgrid=True, gridcolor='#f2f2f2', zeroline=False), 
+                        yaxis=dict(showgrid=True, gridcolor='#f2f2f2', zeroline=False),
+                        plot_bgcolor='white',
+                        paper_bgcolor='white',
+                        margin=dict(t=60, b=40, l=40, r=40)
                     )
-                    
-                    # Visuele Alpha Zone (0-90 graden highlight is lastig in scatter, we doen tekst)
-                    fig2.add_annotation(x=103, y=103, text="ALPHA ZONE (45°)", showarrow=False, font=dict(color="#006400", size=14, weight="bold"))
 
-                    # Assen range fix
+                    # Assen en Watermerken
+                    fig2.add_hline(y=100, line_color="black", line_width=1)
+                    fig2.add_vline(x=100, line_color="black", line_width=1)
+                    
+                    # Visuele hulpmiddelen
+                    fig2.add_annotation(x=102, y=102, text="BUY ZONE", showarrow=False, font=dict(size=14, color="#065f46"))
+                    fig2.add_annotation(x=98, y=98, text="AVOID", showarrow=False, font=dict(size=14, color="#991b1b"))
+
+                    # Centreren
                     max_dev = max(abs(rrg_stocks['RS-Ratio']-100).max(), abs(rrg_stocks['RS-Momentum']-100).max()) * 1.1
                     fig2.update_xaxes(range=[100-max_dev, 100+max_dev])
                     fig2.update_yaxes(range=[100-max_dev, 100+max_dev])
@@ -543,29 +521,35 @@ with tab3:
                     st.plotly_chart(fig2, use_container_width=True)
 
                 with col2:
-                    st.markdown("### 🏆 Top Picks (Quant)")
-                    st.caption("Ranking op basis van Heading (45°) + Distance + Marktregime")
+                    st.markdown("### 🎯 Focus List")
+                    st.caption("Top Picks (Dichtst bij 45°)")
                     
-                    # --- DE QUANT RANKING ---
-                    # 1. Filter eerst op de BUY/WATCH signalen uit de functie
-                    top_picks = rrg_stocks[rrg_stocks['Action'].isin(['BUY', 'SPEC BUY', 'WATCH'])]
+                    # We maken een custom sortering:
+                    # We willen aandelen die het dichtst bij 45 graden zitten bovenaan.
+                    # Dus we berekenen de absolute afwijking van 45.
                     
-                    # 2. Sorteer op de berekende Alpha_Score (hoogste bovenaan)
-                    top_picks = top_picks.sort_values('Alpha_Score', ascending=False).head(15)
+                    df_view = rrg_stocks.copy()
+                    df_view['Afwijking_45'] = abs(df_view['Heading'] - 45)
+                    
+                    # Filter: Alleen de groene zone (0-90) in de tabel tonen? 
+                    # Of alles tonen maar sorteren op 'beste'?
+                    # Laten we de top 15 tonen die het dichtst bij 45 graden zitten (en >0 heading).
+                    
+                    top_picks = df_view[
+                        (df_view['Heading'] >= 0) & (df_view['Heading'] <= 90)
+                    ].sort_values('Afwijking_45', ascending=True).head(15)
                     
                     if not top_picks.empty:
-                        # Mooie tabel
                         st.dataframe(
-                            top_picks[['Ticker', 'Alpha_Score', 'Heading', 'Action']].style
-                            .background_gradient(subset=['Alpha_Score'], cmap='Greens')
-                            .format({"Heading": "{:.0f}°", "Alpha_Score": "{:.1f}"}),
+                            top_picks[['Ticker', 'Heading', 'Distance']].style
+                            .background_gradient(subset=['Heading'], cmap='Greens') # Simpele groen tint voor tabel
+                            .format({"Heading": "{:.1f}°", "Distance": "{:.2f}"}),
                             hide_index=True,
                             use_container_width=True,
                             height=600
                         )
                     else:
-                        st.warning("Geen 'High Conviction' signalen gevonden in de huidige markt.")
-                        st.info("Tip: Controleer aandelen in het 'Improving' kwadrant handmatig.")
+                        st.write("Geen aandelen in de Buy Zone (0-90°).")
 
             else:
                 st.warning("⚠️ Onvoldoende data voor plot.")
