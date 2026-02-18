@@ -25,10 +25,17 @@ MARKETS = {
 }
 
 US_SECTOR_MAP = {
-    'Technology': 'XLK', 'Financials': 'XLF', 'Health Care': 'XLV',
-    'Energy': 'XLE', 'Consumer Discretionary': 'XLY', 'Industrials': 'XLI',
-    'Utilities': 'XLU', 'Materials': 'XLB', 'Real Estate': 'XLRE',
-    'Communication Services': 'XLC', 'Consumer Staples': 'XLP'
+    'Information Technology': 'XLK',  # Aangepast van 'Technology'
+    'Financials': 'XLF',
+    'Health Care': 'XLV',
+    'Energy': 'XLE',
+    'Consumer Discretionary': 'XLY',
+    'Industrials': 'XLI',
+    'Utilities': 'XLU',
+    'Materials': 'XLB',
+    'Real Estate': 'XLRE',
+    'Communication Services': 'XLC',
+    'Consumer Staples': 'XLP'
 }
 
 COLOR_MAP = {
