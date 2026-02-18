@@ -3,6 +3,7 @@ import yfinance as yf
 import pandas as pd
 import plotly.express as px
 import openai
+import requests
 
 # --- CONFIGURATIE ---
 st.set_page_config(page_title="MidCap Market Screener", layout="wide", page_icon="📈")
@@ -23,19 +24,53 @@ SECTOR_MAP = {
 
 # --- DATA FUNCTIES ---
 
-@st.cache_data(ttl=24*3600) # 1x per dag ophalen is genoeg
+# --- VERVANG DE OUDE get_sp400_tickers FUNCTIE DOOR DEZE ---
+
+@st.cache_data(ttl=24*3600)
 def get_sp400_tickers():
-    """Haalt de S&P 400 tickers op van Wikipedia."""
+    """
+    Haalt S&P 400 tickers op met een 'User-Agent' vermomming om
+    de Wikipedia blokkade te omzeilen.
+    """
+    # Noodlijst (Fallback) voor als Wikipedia echt plat ligt
+    fallback_list = [
+        "JBL", "DECK", "RPM", "TTC", "EMN", "GNTX", "WSO", "FICO", "LECO", "ATR",
+        "MANH", "RGLD", "NDSN", "WST", "TECH", "SAIA", "PFGC", "EXP", "CNM", "CASY"
+    ]
+
     try:
         url = "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies"
-        df = pd.read_html(url)[0]
-        tickers = df['Ticker Symbol'].tolist()
-        # Clean tickers (sommige hebben punten, YF wil streepjes of andersom)
-        tickers = [t.replace('.', '-') for t in tickers]
-        return tickers
+        
+        # Dit is de truc: We doen alsof we een Windows computer met Chrome zijn
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        
+        # Gebruik requests om de HTML op te halen
+        response = requests.get(url, headers=headers)
+        response.raise_for_status() # Check of het gelukt is (geen 403 meer)
+        
+        # Lees de tabellen uit de HTML tekst
+        dfs = pd.read_html(response.text)
+        df = dfs[0]
+        
+        # Wikipedia verandert kolomnamen soms. Check welke bestaat.
+        if 'Symbol' in df.columns:
+            tickers = df['Symbol'].tolist()
+        elif 'Ticker Symbol' in df.columns:
+            tickers = df['Ticker Symbol'].tolist()
+        else:
+            # Als we de kolom niet vinden, pak de eerste kolom
+            tickers = df.iloc[:, 0].tolist()
+            
+        # Clean tickers (vervang punten door streepjes voor Yahoo)
+        clean_tickers = [str(t).replace('.', '-') for t in tickers]
+        
+        return clean_tickers
+
     except Exception as e:
-        st.error(f"Kon S&P 400 lijst niet ophalen: {e}")
-        return []
+        st.error(f"⚠️ Wikipedia blokkade actief. We tonen een beperkte noodlijst. (Fout: {e})")
+        return fallback_list
 
 @st.cache_data(ttl=3600)
 def get_data(tickers):
