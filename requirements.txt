@@ -6,3 +6,4 @@ openai
 lxml
 openpyxl
 matplotlib
+requests
