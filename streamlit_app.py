@@ -4,6 +4,7 @@ import pandas as pd
 import plotly.express as px
 import openai
 import requests
+import matplotlib.pyplot as plt # Nodig voor de background_gradient
 
 # --- CONFIGURATIE ---
 st.set_page_config(page_title="MidCap Market Screener", layout="wide", page_icon="📈")
@@ -12,71 +13,61 @@ st.set_page_config(page_title="MidCap Market Screener", layout="wide", page_icon
 BENCHMARK_US = 'MDY'  # S&P 400 MidCap ETF
 BENCHMARK_NAME = "S&P 400 (MidCap)"
 
-# Sector ETFs (We gebruiken de standaard SPDRs omdat die het meest liquide zijn, 
-# maar we meten ze nu tegen de MidCap index)
+# Sector ETFs mapping (voor de RRG in Tab 1)
 SECTOR_MAP = {
     'Technology': 'XLK', 'Financials': 'XLF', 'Health Care': 'XLV',
     'Energy': 'XLE', 'Discretionary': 'XLY', 'Industrials': 'XLI',
     'Utilities': 'XLU', 'Materials': 'XLB', 'Real Estate': 'XLRE',
-    'Comm Services': 'XLC', 'Staples': 'XLP', 
-    'Benchmark (MidCap)': BENCHMARK_US
+    'Comm Services': 'XLC', 'Staples': 'XLP'
 }
 
 # --- DATA FUNCTIES ---
 
-# --- VERVANG DE OUDE get_sp400_tickers FUNCTIE DOOR DEZE ---
-
 @st.cache_data(ttl=24*3600)
-def get_sp400_tickers():
+def get_sp400_data():
     """
-    Haalt S&P 400 tickers op met een 'User-Agent' vermomming om
-    de Wikipedia blokkade te omzeilen.
+    Haalt S&P 400 tickers EN sectoren op van Wikipedia.
+    Geeft een DataFrame terug: [Ticker, Sector]
     """
-    # Noodlijst (Fallback) voor als Wikipedia echt plat ligt
-    fallback_list = [
-        "JBL", "DECK", "RPM", "TTC", "EMN", "GNTX", "WSO", "FICO", "LECO", "ATR",
-        "MANH", "RGLD", "NDSN", "WST", "TECH", "SAIA", "PFGC", "EXP", "CNM", "CASY"
-    ]
-
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies"
+    
     try:
-        url = "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies"
-        
-        # Dit is de truc: We doen alsof we een Windows computer met Chrome zijn
+        # User-Agent vermomming om 403 error te voorkomen
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
-        
-        # Gebruik requests om de HTML op te halen
         response = requests.get(url, headers=headers)
-        response.raise_for_status() # Check of het gelukt is (geen 403 meer)
+        response.raise_for_status()
         
-        # Lees de tabellen uit de HTML tekst
         dfs = pd.read_html(response.text)
         df = dfs[0]
         
-        # Wikipedia verandert kolomnamen soms. Check welke bestaat.
-        if 'Symbol' in df.columns:
-            tickers = df['Symbol'].tolist()
-        elif 'Ticker Symbol' in df.columns:
-            tickers = df['Ticker Symbol'].tolist()
-        else:
-            # Als we de kolom niet vinden, pak de eerste kolom
-            tickers = df.iloc[:, 0].tolist()
-            
-        # Clean tickers (vervang punten door streepjes voor Yahoo)
-        clean_tickers = [str(t).replace('.', '-') for t in tickers]
+        # Kolomnamen normaliseren (soms heet het 'Symbol', soms 'Ticker Symbol')
+        sym_col = 'Symbol' if 'Symbol' in df.columns else 'Ticker Symbol'
+        sec_col = 'GICS Sector' if 'GICS Sector' in df.columns else 'Sector' # Soms heet het anders
         
-        return clean_tickers
+        # Maak een schone dataframe
+        clean_df = df[[sym_col, sec_col]].copy()
+        clean_df.columns = ['Ticker', 'Sector']
+        
+        # Yahoo format fix (punten naar streepjes)
+        clean_df['Ticker'] = clean_df['Ticker'].str.replace('.', '-', regex=False)
+        
+        return clean_df
 
     except Exception as e:
-        st.error(f"⚠️ Wikipedia blokkade actief. We tonen een beperkte noodlijst. (Fout: {e})")
-        return fallback_list
+        st.error(f"⚠️ Wikipedia data niet beschikbaar: {e}")
+        # Fallback data als Wikipedia faalt
+        return pd.DataFrame({
+            'Ticker': ["JBL", "DECK", "RPM", "TTC", "EMN"],
+            'Sector': ["Technology", "Discretionary", "Materials", "Industrials", "Materials"]
+        })
 
 @st.cache_data(ttl=3600)
-def get_data(tickers):
+def get_price_data(tickers):
     if not tickers: return pd.DataFrame()
-    # Download data
     try:
+        # Batch download
         data = yf.download(tickers, period="1y", progress=False, auto_adjust=True)['Close']
         return data
     except Exception:
@@ -87,21 +78,19 @@ def calculate_rrg(df, benchmark):
     
     rrg_data = []
     
-    # Gebruik alleen de laatste datum
-    current_date = df.index[-1]
-    
     for col in df.columns:
         if col == benchmark: continue
         
-        # JdK RS-Ratio & Momentum Berekening
         # 1. RS = Prijs / Benchmark
         rs = df[col] / df[benchmark]
         
-        # 2. Ratio = 100 * (RS / Gemiddelde RS van 100 dagen)
+        # 2. RS-Ratio (Trend) = 100 * (RS / Gemiddelde RS van 100 dagen)
+        # Is de trend beter (>100) of slechter (<100) dan de index?
         rs_ma = rs.rolling(window=100).mean()
         rs_ratio = 100 * (rs / rs_ma)
         
-        # 3. Momentum = 100 * (Ratio / Ratio van 10 dagen geleden)
+        # 3. RS-Momentum (Snelheid) = 100 * (Ratio / Ratio van 10 dagen geleden)
+        # Versnelt de trend (>100) of vertraagt hij (<100)?
         rs_mom = 100 * (rs_ratio / rs_ratio.shift(10))
         
         curr_r = rs_ratio.iloc[-1]
@@ -113,7 +102,7 @@ def calculate_rrg(df, benchmark):
             elif curr_r < 100 and curr_m < 100: status = "LAGGING 🔴"
             else: status = "WEAKENING 🟡"
             
-            # Zoek leesbare naam
+            # Zoek leesbare naam voor sectoren
             sector_name = [k for k, v in SECTOR_MAP.items() if v == col]
             label = sector_name[0] if sector_name else col
             
@@ -128,22 +117,17 @@ def calculate_rrg(df, benchmark):
     return pd.DataFrame(rrg_data)
 
 def calculate_ranking(df):
-    if df.empty: return pd.DataFrame()
-    
-    # We hebben minstens 6 maanden data nodig
-    if len(df) < 130: return pd.DataFrame()
+    if df.empty or len(df) < 130: return pd.DataFrame()
     
     current = df.iloc[-1]
     p1m = df.shift(21).iloc[-1]
     p3m = df.shift(63).iloc[-1]
     p6m = df.shift(126).iloc[-1]
     
-    # Rendementen
     r1 = (current / p1m) - 1
     r3 = (current / p3m) - 1
     r6 = (current / p6m) - 1
     
-    # Score: Recente prestaties wegen mee, maar trend over 6m is leidend
     score = (r1 * 0.2) + (r3 * 0.4) + (r6 * 0.4)
     
     rank_df = pd.DataFrame({
@@ -170,11 +154,11 @@ def get_ai_advice(ticker, key):
         trend = "Stijgend" if hist['Close'].iloc[-1] > hist['Close'].iloc[0] else "Dalend"
         
         prompt = f"""
-        Analyseer aandeel {ticker} (MidCap VS). Bedrijf: {info.get('longName', ticker)}.
+        Analyseer aandeel {ticker}. Bedrijf: {info.get('longName', ticker)}.
         Sector: {info.get('sector', 'Unknown')}. Huidige Trend (1m): {trend}.
         Geef beknopt advies in het Nederlands:
-        1. Fundamenteel oordeel (Kort).
-        2. Technisch oordeel (Kort).
+        1. Fundamenteel oordeel.
+        2. Technisch oordeel.
         3. Conclusie (Kopen/Houden/Verkopen).
         """
         
@@ -204,65 +188,105 @@ api_key = st.sidebar.text_input("OpenAI Key (Optioneel)", type="password")
 
 st.title(f"🚀 Screener: {selected_market_label}")
 
-# Data Logic op basis van keuze
-tickers = []
-if market_code == "SP400":
-    st.info(f"Ophalen van S&P 400 MidCap componenten... (Benchmark: {BENCHMARK_US})")
-    tickers = get_sp400_tickers()
-elif market_code == "NL":
-    tickers = ["ASML.AS", "UNA.AS", "HEIA.AS", "SHELL.AS", "AD.AS", "INGA.AS", "DSM.AS", "ABN.AS", "KPN.AS", "WKL.AS", "RAND.AS", "NN.AS", "BESI.AS", "ADYEN.AS", "IMCD.AS"]
-elif market_code == "BE":
-    tickers = ["KBC.BR", "UCB.BR", "SOLB.BR", "ACKB.BR", "ARGX.BR", "UMI.BR", "GBL.BR", "COFB.BR", "WDP.BR", "ELI.BR", "AED.BR"]
+# --- DATA VOORBEREIDING ---
+tickers_to_scan = []
+sector_df = pd.DataFrame()
 
-# Tabs
+if market_code == "SP400":
+    # Haal de master lijst op (Ticker + Sector)
+    sp400_df = get_sp400_data()
+    if not sp400_df.empty:
+        tickers_to_scan = sp400_df['Ticker'].tolist()
+        sector_df = sp400_df # Bewaar voor filtering later
+    else:
+        st.warning("Kon S&P 400 lijst niet laden.")
+elif market_code == "NL":
+    tickers_to_scan = ["ASML.AS", "UNA.AS", "HEIA.AS", "SHELL.AS", "AD.AS", "INGA.AS", "DSM.AS", "ABN.AS", "KPN.AS", "WKL.AS", "RAND.AS", "NN.AS", "BESI.AS", "ADYEN.AS", "IMCD.AS"]
+elif market_code == "BE":
+    tickers_to_scan = ["KBC.BR", "UCB.BR", "SOLB.BR", "ACKB.BR", "ARGX.BR", "UMI.BR", "GBL.BR", "COFB.BR", "WDP.BR", "ELI.BR", "AED.BR"]
+
+# --- TABS ---
 tab1, tab2, tab3 = st.tabs(["📊 Sector Rotatie", "🏆 Aandelen Ranking", "🤖 AI Analist"])
 
 # TAB 1: RRG (Sectoren)
 with tab1:
     st.subheader(f"Sector Rotatie vs {BENCHMARK_NAME}")
+    
+    # UITLEG EXPANDER
+    with st.expander("ℹ️ Hoe lees ik deze grafiek? (Klik voor uitleg)"):
+        st.markdown("""
+        Deze grafiek (RRG) toont de rotatie van sectoren ten opzichte van de index.
+        
+        * **X-As (RS-Ratio):** Is de trend beter (>100) of slechter (<100) dan de index?
+        * **Y-As (RS-Momentum):** Neemt de kracht toe (>100) of af (<100)?
+        
+        **De 4 Fases:**
+        1.  🟢 **LEADING (Rechtsboven):** Sterke trend + Positief momentum. **(Kopen/Vasthouden)**
+        2.  🟡 **WEAKENING (Rechtsonder):** Sterke trend, maar verliest snelheid. **(Winst nemen?)**
+        3.  🔴 **LAGGING (Linksonder):** Slechte trend + Negatief momentum. **(Vermijden/Short)**
+        4.  🔵 **IMPROVING (Linksboven):** Trend is nog slecht, maar draait bij. **(Kansen zoeken)**
+        
+        *Tip: De klok mee is de natuurlijke rotatie. Van Improving -> Leading -> Weakening -> Lagging.*
+        """)
+
     if market_code == "SP400":
-        # Voor USA gebruiken we de Sector ETFs
         sector_tickers = list(SECTOR_MAP.values())
         with st.spinner('Sector data ophalen...'):
-            sector_data = get_data(sector_tickers)
+            sector_data = get_price_data(sector_tickers + [BENCHMARK_US])
         
         if not sector_data.empty:
             rrg_df = calculate_rrg(sector_data, BENCHMARK_US)
             if not rrg_df.empty:
-                # Plot
                 
                 fig = px.scatter(rrg_df, x="RS-Ratio", y="RS-Momentum", 
                                  color="Kwadrant", text="Naam", hover_data=["Ticker"],
-                                 title=f"RRG: Sectoren vs {BENCHMARK_NAME}", height=600)
+                                 title=f"RRG: Sectoren vs {BENCHMARK_NAME}", height=600,
+                                 color_discrete_map={
+                                     "LEADING 🟢": "green", "WEAKENING 🟡": "orange",
+                                     "LAGGING 🔴": "red", "IMPROVING 🔵": "blue"
+                                 })
                 
-                # Crosshair
                 fig.add_hline(y=100, line_dash="dash", line_color="gray")
                 fig.add_vline(x=100, line_dash="dash", line_color="gray")
-                fig.add_shape(type="rect", x0=100, y0=100, x1=105, y1=105, fillcolor="green", opacity=0.1, line_width=0)
+                # Groen vlak arceren
+                fig.add_shape(type="rect", x0=100, y0=100, x1=115, y1=115, fillcolor="green", opacity=0.1, line_width=0)
                 
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 st.warning("Onvoldoende data voor RRG.")
     else:
-        st.info("Sector RRG is momenteel alleen beschikbaar voor de US markt (ivm ETF beschikbaarheid).")
+        st.info("Sector RRG is momenteel alleen beschikbaar voor de US markt.")
 
 # TAB 2: Ranking
 with tab2:
     st.subheader(f"Momentum Ranking: {selected_market_label}")
     
+    # FILTER LOGICA
+    active_tickers = tickers_to_scan
+    
+    if market_code == "SP400" and not sector_df.empty:
+        # Haal unieke sectoren op
+        unique_sectors = sorted(sector_df['Sector'].unique().tolist())
+        # Voeg 'Alle' optie toe
+        selected_sector = st.selectbox("🔍 Filter op Industrie:", ["Alle Sectoren"] + unique_sectors)
+        
+        if selected_sector != "Alle Sectoren":
+            # Filter de dataframe
+            filtered_df = sector_df[sector_df['Sector'] == selected_sector]
+            active_tickers = filtered_df['Ticker'].tolist()
+            st.success(f"Gefilterd: {len(active_tickers)} aandelen in sector '{selected_sector}'")
+    
     if st.button("🚀 Start Scan"):
-        with st.spinner(f"Koersen ophalen voor {len(tickers)} aandelen..."):
-            # Batch download is sneller
-            stock_data = get_data(tickers)
+        with st.spinner(f"Koersen ophalen voor {len(active_tickers)} aandelen..."):
+            
+            stock_data = get_price_data(active_tickers)
             
             if not stock_data.empty:
                 rank_df = calculate_ranking(stock_data)
                 
                 if not rank_df.empty:
-                    # Sla op voor AI tab
                     st.session_state['top_stock'] = rank_df.iloc[0]['Ticker']
                     
-                    # DE TABEL (Hier zat de fout, nu opgelost door matplotlib in requirements.txt)
                     st.dataframe(
                         rank_df.style.format({
                             'Prijs': '{:.2f}', 
@@ -275,7 +299,7 @@ with tab2:
                         height=600
                     )
                 else:
-                    st.warning("Geen rankings kunnen berekenen (data te kort of incompleet).")
+                    st.warning("Geen rankings kunnen berekenen.")
             else:
                 st.error("Data download mislukt.")
 
@@ -285,7 +309,6 @@ with tab3:
     
     col1, col2 = st.columns([1, 2])
     with col1:
-        # Pak de winnaar uit tab 2 als die er is
         default_ticker = st.session_state.get('top_stock', "")
         user_ticker = st.text_input("Ticker Symbool", value=default_ticker)
         analyze_btn = st.button("Vraag AI Advies")
