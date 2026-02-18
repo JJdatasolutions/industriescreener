@@ -5,66 +5,68 @@ import plotly.express as px
 import openai
 
 # --- CONFIGURATIE ---
-st.set_page_config(page_title="Market Screener Pro", layout="wide", page_icon="📈")
+st.set_page_config(page_title="MidCap Market Screener", layout="wide", page_icon="📈")
 
-# Markten Configuratie
-# We gebruiken vaste lijsten voor NL/BE omdat Wikipedia tabellen vaak veranderen van formaat
-MARKETS = {
-    "🇺🇸 USA (S&P 500 Sector ETFs)": {
-        "type": "etf",
-        "tickers": ["XLK", "XLF", "XLV", "XLE", "XLY", "XLI", "XLU", "XLB", "XLRE", "XLC", "XLP", "SPY"]
-    },
-    "🇳🇱 Nederland (AEX/AMX Selectie)": {
-        "type": "stock",
-        "tickers": [
-            "ASML.AS", "UNA.AS", "HEIA.AS", "SHELL.AS", "AD.AS", "INGA.AS", "DSM.AS", 
-            "ABN.AS", "KPN.AS", "WKL.AS", "RAND.AS", "NN.AS", "IMCD.AS", "ASM.AS", 
-            "BESI.AS", "MT.AS", "TKWY.AS", "PHI.AS", "UMG.AS", "ADYEN.AS", "WDP.AS"
-        ]
-    },
-    "🇧🇪 België (BEL 20)": {
-        "type": "stock",
-        "tickers": [
-            "ABI.BR", "ACKB.BR", "AED.BR", "AGS.BR", "APAM.BR", "ARGX.BR", "COFB.BR",
-            "ELI.BR", "GBL.BR", "KBC.BR", "LOTB.BR", "MELE.BR", "PROX.BR", "SOF.BR",
-            "SOLB.BR", "TNET.BR", "UCB.BR", "UMI.BR", "VGP.BR", "WDP.BR", "XIOR.BR"
-        ]
-    }
+# Constanten
+BENCHMARK_US = 'MDY'  # S&P 400 MidCap ETF
+BENCHMARK_NAME = "S&P 400 (MidCap)"
+
+# Sector ETFs (We gebruiken de standaard SPDRs omdat die het meest liquide zijn, 
+# maar we meten ze nu tegen de MidCap index)
+SECTOR_MAP = {
+    'Technology': 'XLK', 'Financials': 'XLF', 'Health Care': 'XLV',
+    'Energy': 'XLE', 'Discretionary': 'XLY', 'Industrials': 'XLI',
+    'Utilities': 'XLU', 'Materials': 'XLB', 'Real Estate': 'XLRE',
+    'Comm Services': 'XLC', 'Staples': 'XLP', 
+    'Benchmark (MidCap)': BENCHMARK_US
 }
 
-# Mapping voor leesbare namen
-SECTOR_NAMES = {
-    'XLK': 'Technology', 'XLF': 'Financials', 'XLV': 'Health Care',
-    'XLE': 'Energy', 'XLY': 'Discretionary', 'XLI': 'Industrials',
-    'XLU': 'Utilities', 'XLB': 'Materials', 'XLRE': 'Real Estate',
-    'XLC': 'Comm Services', 'XLP': 'Staples', 'SPY': 'Benchmark'
-}
+# --- DATA FUNCTIES ---
 
-# --- FUNCTIES ---
+@st.cache_data(ttl=24*3600) # 1x per dag ophalen is genoeg
+def get_sp400_tickers():
+    """Haalt de S&P 400 tickers op van Wikipedia."""
+    try:
+        url = "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies"
+        df = pd.read_html(url)[0]
+        tickers = df['Ticker Symbol'].tolist()
+        # Clean tickers (sommige hebben punten, YF wil streepjes of andersom)
+        tickers = [t.replace('.', '-') for t in tickers]
+        return tickers
+    except Exception as e:
+        st.error(f"Kon S&P 400 lijst niet ophalen: {e}")
+        return []
 
 @st.cache_data(ttl=3600)
 def get_data(tickers):
     if not tickers: return pd.DataFrame()
-    # Download data, auto_adjust zorgt voor splits/dividends correctie
-    data = yf.download(tickers, period="2y", progress=False, auto_adjust=True)['Close']
-    return data
+    # Download data
+    try:
+        data = yf.download(tickers, period="1y", progress=False, auto_adjust=True)['Close']
+        return data
+    except Exception:
+        return pd.DataFrame()
 
-def calculate_rrg(df, benchmark='SPY'):
-    # Relatieve Rotatie Grafiek Logic
+def calculate_rrg(df, benchmark):
     if benchmark not in df.columns: return pd.DataFrame()
     
     rrg_data = []
     
+    # Gebruik alleen de laatste datum
+    current_date = df.index[-1]
+    
     for col in df.columns:
         if col == benchmark: continue
         
-        # RS = Stock / Benchmark
+        # JdK RS-Ratio & Momentum Berekening
+        # 1. RS = Prijs / Benchmark
         rs = df[col] / df[benchmark]
         
-        # RS-Ratio = 100 * (RS / Average(RS, 100))
-        rs_ratio = 100 * (rs / rs.rolling(100).mean())
+        # 2. Ratio = 100 * (RS / Gemiddelde RS van 100 dagen)
+        rs_ma = rs.rolling(window=100).mean()
+        rs_ratio = 100 * (rs / rs_ma)
         
-        # RS-Momentum = 100 * (Ratio / Ratio_10_days_ago)
+        # 3. Momentum = 100 * (Ratio / Ratio van 10 dagen geleden)
         rs_mom = 100 * (rs_ratio / rs_ratio.shift(10))
         
         curr_r = rs_ratio.iloc[-1]
@@ -76,12 +78,13 @@ def calculate_rrg(df, benchmark='SPY'):
             elif curr_r < 100 and curr_m < 100: status = "LAGGING 🔴"
             else: status = "WEAKENING 🟡"
             
-            # Naam ophalen
-            name = SECTOR_NAMES.get(col, col)
+            # Zoek leesbare naam
+            sector_name = [k for k, v in SECTOR_MAP.items() if v == col]
+            label = sector_name[0] if sector_name else col
             
             rrg_data.append({
                 'Ticker': col,
-                'Naam': name,
+                'Naam': label,
                 'RS-Ratio': curr_r,
                 'RS-Momentum': curr_m,
                 'Kwadrant': status
@@ -90,10 +93,9 @@ def calculate_rrg(df, benchmark='SPY'):
     return pd.DataFrame(rrg_data)
 
 def calculate_ranking(df):
-    # Momentum Ranking Logic
     if df.empty: return pd.DataFrame()
     
-    # Check of we genoeg data hebben (minimaal 6 maanden + beetje extra)
+    # We hebben minstens 6 maanden data nodig
     if len(df) < 130: return pd.DataFrame()
     
     current = df.iloc[-1]
@@ -101,12 +103,12 @@ def calculate_ranking(df):
     p3m = df.shift(63).iloc[-1]
     p6m = df.shift(126).iloc[-1]
     
-    # Returns
+    # Rendementen
     r1 = (current / p1m) - 1
     r3 = (current / p3m) - 1
     r6 = (current / p6m) - 1
     
-    # Score: 20% 1m + 40% 3m + 40% 6m
+    # Score: Recente prestaties wegen mee, maar trend over 6m is leidend
     score = (r1 * 0.2) + (r3 * 0.4) + (r6 * 0.4)
     
     rank_df = pd.DataFrame({
@@ -118,30 +120,26 @@ def calculate_ranking(df):
         'Score': score * 100
     })
     
-    # Verwijder kolommen met NaN score
-    rank_df = rank_df.dropna(subset=['Score'])
-    
-    return rank_df.sort_values('Score', ascending=False)
+    return rank_df.sort_values('Score', ascending=False).dropna()
 
 def get_ai_advice(ticker, key):
     if not key: return "⚠️ Voer eerst een OpenAI API sleutel in."
-    
     try:
         client = openai.OpenAI(api_key=key)
         stock = yf.Ticker(ticker)
         hist = stock.history(period="1mo")
         info = stock.info
         
-        if hist.empty: return "Geen data gevonden."
+        if hist.empty: return "Geen data."
         
         trend = "Stijgend" if hist['Close'].iloc[-1] > hist['Close'].iloc[0] else "Dalend"
         
         prompt = f"""
-        Analyseer {ticker}. Bedrijf: {info.get('longName', ticker)}.
+        Analyseer aandeel {ticker} (MidCap VS). Bedrijf: {info.get('longName', ticker)}.
         Sector: {info.get('sector', 'Unknown')}. Huidige Trend (1m): {trend}.
         Geef beknopt advies in het Nederlands:
-        1. Fundamenteel oordeel.
-        2. Technisch oordeel.
+        1. Fundamenteel oordeel (Kort).
+        2. Technisch oordeel (Kort).
         3. Conclusie (Kopen/Houden/Verkopen).
         """
         
@@ -156,68 +154,110 @@ def get_ai_advice(ticker, key):
 # --- UI OPBOUW ---
 
 st.sidebar.header("⚙️ Instellingen")
-market_choice = st.sidebar.selectbox("Kies Markt", list(MARKETS.keys()))
+
+# Markt Keuze
+market_options = {
+    "🇺🇸 USA (S&P 400 MidCap)": "SP400",
+    "🇳🇱 Nederland (AEX/AMX)": "NL",
+    "🇧🇪 België (BEL 20)": "BE"
+}
+selected_market_label = st.sidebar.selectbox("Kies Markt", list(market_options.keys()))
+market_code = market_options[selected_market_label]
+
+# API Key
 api_key = st.sidebar.text_input("OpenAI Key (Optioneel)", type="password")
-st.sidebar.info("Zonder key werken de grafieken wel, maar de AI niet.")
 
-st.title(f"🚀 Market Screener: {market_choice}")
+st.title(f"🚀 Screener: {selected_market_label}")
 
-# Haal data op
-tickers = MARKETS[market_choice]["tickers"]
-with st.spinner('Data ophalen...'):
-    df_prices = get_data(tickers)
+# Data Logic op basis van keuze
+tickers = []
+if market_code == "SP400":
+    st.info(f"Ophalen van S&P 400 MidCap componenten... (Benchmark: {BENCHMARK_US})")
+    tickers = get_sp400_tickers()
+elif market_code == "NL":
+    tickers = ["ASML.AS", "UNA.AS", "HEIA.AS", "SHELL.AS", "AD.AS", "INGA.AS", "DSM.AS", "ABN.AS", "KPN.AS", "WKL.AS", "RAND.AS", "NN.AS", "BESI.AS", "ADYEN.AS", "IMCD.AS"]
+elif market_code == "BE":
+    tickers = ["KBC.BR", "UCB.BR", "SOLB.BR", "ACKB.BR", "ARGX.BR", "UMI.BR", "GBL.BR", "COFB.BR", "WDP.BR", "ELI.BR", "AED.BR"]
 
 # Tabs
-tab1, tab2, tab3 = st.tabs(["📊 Sector/RRG", "🏆 Ranking", "🤖 AI Analist"])
+tab1, tab2, tab3 = st.tabs(["📊 Sector Rotatie", "🏆 Aandelen Ranking", "🤖 AI Analist"])
 
+# TAB 1: RRG (Sectoren)
 with tab1:
-    st.subheader("Relative Rotation Graph (RRG)")
-    # Alleen RRG tonen als we de USA ETF lijst hebben (of een index)
-    if "USA" in market_choice and not df_prices.empty:
-        rrg_df = calculate_rrg(df_prices)
-        if not rrg_df.empty:
-            
-            fig = px.scatter(rrg_df, x="RS-Ratio", y="RS-Momentum", 
-                             color="Kwadrant", text="Naam", hover_data=["Ticker"],
-                             title="Sector Rotatie vs S&P 500", height=600)
-            fig.add_hline(y=100, line_dash="dash", line_color="gray")
-            fig.add_vline(x=100, line_dash="dash", line_color="gray")
-            fig.add_shape(type="rect", x0=100, y0=100, x1=110, y1=110, fillcolor="green", opacity=0.1, line_width=0)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.warning("Niet genoeg data voor RRG.")
+    st.subheader(f"Sector Rotatie vs {BENCHMARK_NAME}")
+    if market_code == "SP400":
+        # Voor USA gebruiken we de Sector ETFs
+        sector_tickers = list(SECTOR_MAP.values())
+        with st.spinner('Sector data ophalen...'):
+            sector_data = get_data(sector_tickers)
+        
+        if not sector_data.empty:
+            rrg_df = calculate_rrg(sector_data, BENCHMARK_US)
+            if not rrg_df.empty:
+                # Plot
+                
+                fig = px.scatter(rrg_df, x="RS-Ratio", y="RS-Momentum", 
+                                 color="Kwadrant", text="Naam", hover_data=["Ticker"],
+                                 title=f"RRG: Sectoren vs {BENCHMARK_NAME}", height=600)
+                
+                # Crosshair
+                fig.add_hline(y=100, line_dash="dash", line_color="gray")
+                fig.add_vline(x=100, line_dash="dash", line_color="gray")
+                fig.add_shape(type="rect", x0=100, y0=100, x1=105, y1=105, fillcolor="green", opacity=0.1, line_width=0)
+                
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("Onvoldoende data voor RRG.")
     else:
-        st.info("RRG grafiek is geoptimaliseerd voor de US Sectoren (ETF's). Voor lokale markten, zie de Ranking tab.")
+        st.info("Sector RRG is momenteel alleen beschikbaar voor de US markt (ivm ETF beschikbaarheid).")
 
+# TAB 2: Ranking
 with tab2:
-    st.subheader("Momentum Ranking")
-    if not df_prices.empty:
-        rank_df = calculate_ranking(df_prices)
-        if not rank_df.empty:
-            st.dataframe(
-                rank_df.style.format({
-                    'Prijs': '{:.2f}', '1M %': '{:+.1f}%', 
-                    '3M %': '{:+.1f}%', '6M %': '{:+.1f}%', 'Score': '{:.1f}'
-                }).background_gradient(subset=['Score'], cmap='RdYlGn'),
-                use_container_width=True, height=600
-            )
-            top_pick = rank_df.iloc[0]['Ticker']
-        else:
-            st.warning("Onvoldoende historie voor ranking.")
-            top_pick = ""
+    st.subheader(f"Momentum Ranking: {selected_market_label}")
+    
+    if st.button("🚀 Start Scan"):
+        with st.spinner(f"Koersen ophalen voor {len(tickers)} aandelen..."):
+            # Batch download is sneller
+            stock_data = get_data(tickers)
+            
+            if not stock_data.empty:
+                rank_df = calculate_ranking(stock_data)
+                
+                if not rank_df.empty:
+                    # Sla op voor AI tab
+                    st.session_state['top_stock'] = rank_df.iloc[0]['Ticker']
+                    
+                    # DE TABEL (Hier zat de fout, nu opgelost door matplotlib in requirements.txt)
+                    st.dataframe(
+                        rank_df.style.format({
+                            'Prijs': '{:.2f}', 
+                            '1M %': '{:+.1f}%', 
+                            '3M %': '{:+.1f}%', 
+                            '6M %': '{:+.1f}%', 
+                            'Score': '{:.1f}'
+                        }).background_gradient(subset=['Score'], cmap='RdYlGn'),
+                        use_container_width=True, 
+                        height=600
+                    )
+                else:
+                    st.warning("Geen rankings kunnen berekenen (data te kort of incompleet).")
+            else:
+                st.error("Data download mislukt.")
 
+# TAB 3: AI
 with tab3:
-    st.subheader("🤖 AI Analyse")
+    st.subheader("🤖 AI Second Opinion")
+    
     col1, col2 = st.columns([1, 2])
     with col1:
-        # Default waarde is de top pick uit tab 2
-        def_val = top_pick if 'top_pick' in locals() else ""
-        symbol = st.text_input("Ticker", value=def_val)
-        if st.button("Vraag AI"):
-            with st.spinner("AI denkt na..."):
-                advies = get_ai_advice(symbol, api_key)
-                st.session_state['ai_result'] = advies
+        # Pak de winnaar uit tab 2 als die er is
+        default_ticker = st.session_state.get('top_stock', "")
+        user_ticker = st.text_input("Ticker Symbool", value=default_ticker)
+        analyze_btn = st.button("Vraag AI Advies")
     
     with col2:
-        if 'ai_result' in st.session_state:
-            st.markdown(st.session_state['ai_result'])
+        if analyze_btn:
+            with st.spinner("AI is aan het analyseren..."):
+                advies = get_ai_advice(user_ticker, api_key)
+                st.markdown(advies)
+                st.caption("Gegenereerd door AI (OpenAI GPT-4o). Geen financieel advies.")
