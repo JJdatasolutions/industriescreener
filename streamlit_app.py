@@ -242,13 +242,19 @@ def calculate_market_health(bench_series):
 st.sidebar.header("⚙️ Instellingen")
 sel_market_key = st.sidebar.selectbox("Kies Markt", list(MARKETS.keys()))
 market_cfg = MARKETS[sel_market_key]
-sel_sector = st.sidebar.selectbox("Kies Sector", ["Alle Sectoren"] + sorted(US_SECTOR_MAP.keys()) if "USA" in sel_market_key else ["Alle Sectoren"])
+
+# Check of we in de USA zitten voor sector map, anders standaard
+sector_list = ["Alle Sectoren"]
+if "USA" in sel_market_key:
+    sector_list += sorted(US_SECTOR_MAP.keys())
+
+sel_sector = st.sidebar.selectbox("Kies Sector", sector_list)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🌡️ Markt Regime")
+st.sidebar.subheader("🌡️ Markt (Benchmark)")
 
+# 1. BENCHMARK DATA (Zoals voorheen)
 bench_df = get_price_data([market_cfg['benchmark']])
-
 market_bull_flag = True # Default
 
 if not bench_df.empty:
@@ -260,30 +266,61 @@ if not bench_df.empty:
     st.sidebar.markdown(f"Trend: :{color}[**{trend} MARKET**]")
     st.sidebar.caption(f"Prijs vs 200d SMA ({dist_pct:.1f}%)")
     
-    # Dispersie Meter (Nieuwe eis)
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("**🌊 Markt Volatiliteit**")
-    st.sidebar.progress(min(int(vola * 30), 100)) # Schaal 0-100 visueel
-    
-    if vola < 0.8: st.sidebar.caption(f"Laag ({vola:.2f}%): Weinig kansen")
-    elif vola > 1.5: st.sidebar.caption(f"Hoog ({vola:.2f}%): Risicovol maar kansrijk")
-    else: st.sidebar.caption(f"Normaal ({vola:.2f}%)")
+    # Dispersie Meter
+    st.sidebar.progress(min(int(vola * 30), 100))
+    if vola < 0.8: st.sidebar.caption(f"Volatiliteit: Laag ({vola:.2f}%)")
+    elif vola > 1.5: st.sidebar.caption(f"Volatiliteit: Hoog ({vola:.2f}%)")
+    else: st.sidebar.caption(f"Volatiliteit: Normaal ({vola:.2f}%)")
 
-    # Mini Grafiek
-    chart_data = s.tail(300).to_frame(name="Koers")
-    chart_data['SMA200'] = s.rolling(200).mean().tail(300)
+    # Mini Grafiek Benchmark
+    chart_data = s.tail(252).to_frame(name="Koers") # 252 dagen = 1 handelsjaar
+    chart_data['SMA200'] = s.rolling(200).mean().tail(252)
+    
     fig_mini = px.line(chart_data, y=["Koers", "SMA200"], height=150)
     fig_mini.update_layout(showlegend=False, margin=dict(l=0, r=0, t=10, b=0), xaxis_title=None, yaxis_title=None)
     fig_mini.update_traces(line_color='gray', selector=dict(name='Koers'))
-    fig_mini.update_traces(line_color=color, selector=dict(name='SMA200')) # Kleur lijn matcht trend
+    fig_mini.update_traces(line_color=color, selector=dict(name='SMA200'))
     st.sidebar.plotly_chart(fig_mini, use_container_width=True)
+
+# 2. SECTOR DATA (NIEUW TOEGEVOEGD)
+# Dit blok wordt alleen getoond als je een specifieke sector kiest EN het een USA markt is
+if sel_sector != "Alle Sectoren" and "USA" in sel_market_key:
+    st.sidebar.markdown("---")
+    st.sidebar.subheader(f"🏗️ Sector: {sel_sector}")
+    
+    sec_ticker = US_SECTOR_MAP.get(sel_sector)
+    
+    if sec_ticker:
+        # Haal data op voor de sector tracker (bijv. XLK)
+        sec_df = get_price_data([sec_ticker])
+        
+        if not sec_df.empty:
+            s_sec = sec_df.iloc[:, 0]
+            # Bereken gezondheid van de SECTOR (onafhankelijk van de markt)
+            sec_trend, sec_dist, sec_sma, sec_vola = calculate_market_health(s_sec)
+            
+            sec_color = "green" if sec_trend == "BULL" else "red"
+            
+            st.sidebar.markdown(f"Ticker: **{sec_ticker}**")
+            st.sidebar.markdown(f"Trend: :{sec_color}[**{sec_trend}**]")
+            st.sidebar.metric("Afstand SMA200", f"{sec_dist:.1f}%")
+            
+            # Mini Grafiek Sector
+            chart_data_sec = s_sec.tail(252).to_frame(name="Koers")
+            chart_data_sec['SMA200'] = s_sec.rolling(200).mean().tail(252)
+            
+            fig_sec = px.line(chart_data_sec, y=["Koers", "SMA200"], height=150)
+            fig_sec.update_layout(showlegend=False, margin=dict(l=0, r=0, t=10, b=0), xaxis_title=None, yaxis_title=None)
+            fig_sec.update_traces(line_color='gray', selector=dict(name='Koers'))
+            fig_sec.update_traces(line_color=sec_color, selector=dict(name='SMA200'))
+            
+            st.sidebar.plotly_chart(fig_sec, use_container_width=True)
 
 st.sidebar.markdown("---")
 if st.sidebar.button("🚀 Start Wetenschappelijke Analyse", type="primary"):
     st.session_state['active'] = True
     st.session_state['market_key'] = sel_market_key
     st.session_state['sector_sel'] = sel_sector
-
 # --- 4. HOOFD SCHERM ---
 
 st.title(f"Quant Screener: {market_cfg['code']}")
