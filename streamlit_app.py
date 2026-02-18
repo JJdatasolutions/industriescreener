@@ -2,361 +2,404 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.express as px
-import openai
+import google.generativeai as genai
 import requests
 import numpy as np
 
 # --- CONFIGURATIE ---
-st.set_page_config(page_title="Pro Market Screener (Scientific)", layout="wide", page_icon="🧭")
+st.set_page_config(page_title="Pro Market Screener (Ultimate)", layout="wide", page_icon="🧭")
 
-# Constanten
-BENCHMARK_US = 'MDY'  # S&P 400 MidCap ETF
-BENCHMARK_NAME = "S&P 400 (MidCap)"
+# --- DATA CONSTANTEN & MAPPINGS ---
 
-SECTOR_MAP = {
+# 1. MARKETS DEFINITIE
+MARKETS = {
+    "🇺🇸 USA - S&P 500 (LargeCap)": {
+        "code": "SP500", 
+        "benchmark": "SPY", 
+        "wiki_url": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+        "type": "wiki"
+    },
+    "🇺🇸 USA - S&P 400 (MidCap)": {
+        "code": "SP400", 
+        "benchmark": "MDY", 
+        "wiki_url": "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies",
+        "type": "wiki"
+    },
+    "🇳🇱 Nederland - AEX/AMX": {
+        "code": "NL", 
+        "benchmark": "^AEX", 
+        "type": "static"
+    },
+    "🇧🇪 België - BEL 20": {
+        "code": "BE", 
+        "benchmark": "^BFX", 
+        "type": "static"
+    }
+}
+
+# 2. US SECTOR ETFS (Alleen voor US RRG)
+US_SECTOR_ETFS = {
     'Technology': 'XLK', 'Financials': 'XLF', 'Health Care': 'XLV',
     'Energy': 'XLE', 'Discretionary': 'XLY', 'Industrials': 'XLI',
     'Utilities': 'XLU', 'Materials': 'XLB', 'Real Estate': 'XLRE',
     'Comm Services': 'XLC', 'Staples': 'XLP'
 }
 
-# --- DATA FUNCTIES ---
+# 3. STATIC DATA VOOR NL/BE (Zzodat sector filter werkt zonder Wikipedia)
+# Dit is nodig omdat Yahoo Finance vaak geen sector info geeft voor Europese tickers
+STATIC_EU_DATA = {
+    # NEDERLAND
+    "ASML.AS": "Technology", "UNA.AS": "Staples", "HEIA.AS": "Staples", "SHELL.AS": "Energy", 
+    "AD.AS": "Staples", "INGA.AS": "Financials", "DSM.AS": "Materials", "ABN.AS": "Financials", 
+    "KPN.AS": "Comm Services", "WKL.AS": "Industrials", "RAND.AS": "Industrials", "NN.AS": "Financials", 
+    "BESI.AS": "Technology", "ADYEN.AS": "Financials", "IMCD.AS": "Materials", "ASM.AS": "Technology",
+    "PHI.AS": "Health Care", "MT.AS": "Materials",
+    # BELGIE
+    "KBC.BR": "Financials", "UCB.BR": "Health Care", "SOLB.BR": "Materials", "ACKB.BR": "Financials", 
+    "ARGX.BR": "Health Care", "UMI.BR": "Materials", "GBL.BR": "Financials", "COFB.BR": "Real Estate", 
+    "WDP.BR": "Real Estate", "ELI.BR": "Utilities", "AED.BR": "Real Estate", "ABI.BR": "Staples",
+    "LOTB.BR": "Staples", "APAM.BR": "Materials", "VGP.BR": "Real Estate", "MELE.BR": "Industrials"
+}
+
+# --- FUNCTIES ---
 
 @st.cache_data(ttl=24*3600)
-def get_sp400_data():
-    """Haalt S&P 400 tickers EN sectoren op van Wikipedia met user-agent spoofing."""
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies"
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        df = pd.read_html(response.text)[0]
+def get_market_constituents(market_code):
+    """
+    Haalt de lijst van aandelen op.
+    - Voor US: Scrapet Wikipedia.
+    - Voor NL/BE: Gebruikt de statische lijst met hardcoded sectoren.
+    """
+    tickers = []
+    df_result = pd.DataFrame(columns=['Ticker', 'Sector'])
+
+    if market_code in ["SP500", "SP400"]:
+        # WIKI SCRAPING
+        url = MARKETS[next(k for k, v in MARKETS.items() if v['code'] == market_code)]['wiki_url']
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            df = pd.read_html(requests.get(url, headers=headers).text)[0]
+            
+            # Kolomnamen normaliseren
+            sym_col = 'Symbol' if 'Symbol' in df.columns else 'Ticker Symbol'
+            sec_col = 'GICS Sector' if 'GICS Sector' in df.columns else 'Sector'
+            
+            df_result = df[[sym_col, sec_col]].copy()
+            df_result.columns = ['Ticker', 'Sector']
+            df_result['Ticker'] = df_result['Ticker'].str.replace('.', '-', regex=False)
+            
+        except Exception as e:
+            st.error(f"Wikipedia error: {e}")
+            return pd.DataFrame() # Return empty on error
+            
+    else:
+        # STATIC LIST (NL/BE)
+        # Filter de static dict op basis van suffix (.AS of .BR)
+        suffix = ".AS" if market_code == "NL" else ".BR"
+        filtered_data = {k: v for k, v in STATIC_EU_DATA.items() if k.endswith(suffix)}
         
-        sym_col = 'Symbol' if 'Symbol' in df.columns else 'Ticker Symbol'
-        sec_col = 'GICS Sector' if 'GICS Sector' in df.columns else 'Sector'
-        
-        clean_df = df[[sym_col, sec_col]].copy()
-        clean_df.columns = ['Ticker', 'Sector']
-        clean_df['Ticker'] = clean_df['Ticker'].str.replace('.', '-', regex=False)
-        return clean_df
-    except Exception as e:
-        return pd.DataFrame({'Ticker': ["JBL", "DECK", "rpm"], 'Sector': ["Tech", "Disc", "Mat"]})
+        df_result = pd.DataFrame(list(filtered_data.items()), columns=['Ticker', 'Sector'])
+
+    return df_result
 
 @st.cache_data(ttl=3600)
 def get_price_data(tickers):
     if not tickers: return pd.DataFrame()
     try:
-        # Haal iets meer data op voor de 200 SMA (1y = ~252 dagen)
+        # We halen 2 jaar data op voor de 200 SMA en lange termijn momentum
         data = yf.download(tickers, period="2y", progress=False, auto_adjust=True)['Close']
         return data
     except Exception:
         return pd.DataFrame()
 
 def calculate_market_regime(ticker):
-    """
-    Mebane Faber Logic: Bepaal of we in een Bull of Bear markt zitten.
-    Gebruikt de 10-maands SMA (benaderd als 200-dagen SMA).
-    """
+    """Bepaalt of de markt veilig is (Bull/Bear) obv 200 SMA."""
     try:
         data = yf.download(ticker, period="2y", progress=False, auto_adjust=True)['Close']
-        if data.empty: return None, 0, 0
-        
-        current_price = data.iloc[-1]
-        sma_200 = data.rolling(window=200).mean().iloc[-1]
-        
-        status = "BULL" if current_price > sma_200 else "BEAR"
-        return status, current_price, sma_200
+        if data.empty: return "UNKNOWN", 0, 0
+        current = data.iloc[-1]
+        sma = data.rolling(200).mean().iloc[-1]
+        return ("BULL" if current > sma else "BEAR"), current, sma
     except:
-        return None, 0, 0
+        return "UNKNOWN", 0, 0
 
 def calculate_rrg_metrics(df, benchmark):
+    """Berekent RS-Ratio, RS-Momentum, Heading en Distance."""
     if benchmark not in df.columns: return pd.DataFrame()
     
-    rrg_data = []
+    rrg_list = []
     
     for col in df.columns:
         if col == benchmark: continue
         
-        # 1. RS Berekening
+        # 1. Relative Strength
         rs = df[col] / df[benchmark]
-        rs_ma = rs.rolling(window=100).mean()
+        rs_ma = rs.rolling(100).mean()
         
-        # 2. JdK Ratio & Momentum
+        # 2. RRG Indicatoren
         rs_ratio = 100 * (rs / rs_ma)
-        rs_mom = 100 * (rs_ratio / rs_ratio.shift(10)) # Rate of Change van de ratio
+        rs_mom = 100 * (rs_ratio / rs_ratio.shift(10))
         
-        # Huidige waarden
+        if len(rs_ratio) < 2: continue
+
         curr_r = rs_ratio.iloc[-1]
         curr_m = rs_mom.iloc[-1]
-        
-        # Vorige waarden (voor Heading berekening)
         prev_r = rs_ratio.iloc[-2]
         prev_m = rs_mom.iloc[-2]
         
         if pd.notna(curr_r) and pd.notna(curr_m):
-            # Kwadrant
+            # Kwadrant Bepaling
             if curr_r > 100 and curr_m > 100: status = "LEADING 🟢"
             elif curr_r < 100 and curr_m > 100: status = "IMPROVING 🔵"
             elif curr_r < 100 and curr_m < 100: status = "LAGGING 🔴"
             else: status = "WEAKENING 🟡"
             
-            # --- WETENSCHAPPELIJKE TOEVOEGINGEN ---
-            
-            # 1. Distance (Alpha Potentieel): Afstand tot het centrum (100, 100)
-            # Hoe verder weg, hoe sterker de trend (of de overdrijving).
+            # Distance (Alpha potentieel)
             distance = np.sqrt((curr_r - 100)**2 + (curr_m - 100)**2)
             
-            # 2. Heading (Richting): Hoek van de beweging in graden (0-360)
-            # 0° = Oost, 90° = Noord, 180° = West, 270° = Zuid.
-            # We willen 0-90° (NorthEast) zien.
+            # Heading (0-360 graden)
             dx = curr_r - prev_r
             dy = curr_m - prev_m
-            angle_rad = np.arctan2(dy, dx)
-            angle_deg = np.degrees(angle_rad)
-            if angle_deg < 0: angle_deg += 360
+            angle = np.degrees(np.arctan2(dy, dx))
+            if angle < 0: angle += 360
             
-            sector_name = [k for k, v in SECTOR_MAP.items() if v == col]
-            label = sector_name[0] if sector_name else col
+            # Naamgeving
+            name = col
+            # Als het een US Sector ETF is, geef de mooie naam
+            for k, v in US_SECTOR_ETFS.items():
+                if v == col: name = k
             
-            rrg_data.append({
+            rrg_list.append({
                 'Ticker': col,
-                'Naam': label,
+                'Naam': name,
                 'RS-Ratio': curr_r,
                 'RS-Momentum': curr_m,
                 'Kwadrant': status,
                 'Distance': distance,
-                'Heading': angle_deg
+                'Heading': angle
             })
             
-    return pd.DataFrame(rrg_data)
+    return pd.DataFrame(rrg_list)
 
 def calculate_ranking(df):
     if df.empty or len(df) < 130: return pd.DataFrame()
     
-    current = df.iloc[-1]
-    p1m = df.shift(21).iloc[-1]
-    p3m = df.shift(63).iloc[-1]
-    p6m = df.shift(126).iloc[-1]
+    curr = df.iloc[-1]
+    # Returns 1m, 3m, 6m
+    r1 = (curr / df.shift(21).iloc[-1]) - 1
+    r3 = (curr / df.shift(63).iloc[-1]) - 1
+    r6 = (curr / df.shift(126).iloc[-1]) - 1
     
-    r1 = (current / p1m) - 1
-    r3 = (current / p3m) - 1
-    r6 = (current / p6m) - 1
-    
-    # Gewogen score
     score = (r1 * 0.2) + (r3 * 0.4) + (r6 * 0.4)
     
-    rank_df = pd.DataFrame({
+    return pd.DataFrame({
         'Ticker': df.columns,
-        'Prijs': current,
+        'Prijs': curr,
         '1M %': r1 * 100,
         '3M %': r3 * 100,
         '6M %': r6 * 100,
         'Score': score * 100
-    })
-    
-    return rank_df.sort_values('Score', ascending=False).dropna()
+    }).sort_values('Score', ascending=False).dropna()
 
-def get_ai_advice(ticker, key, market_status):
-    if not key: return "⚠️ Voer eerst een OpenAI API sleutel in."
+def get_gemini_advice(ticker, key, market_status, sector):
+    """Vraagt advies aan Google Gemini 1.5 Flash."""
+    if not key: return "⚠️ Voer eerst een Google Gemini sleutel in."
+    
     try:
-        client = openai.OpenAI(api_key=key)
+        genai.configure(api_key=key)
+        model = genai.GenerativeModel('gemini-1.5-flash') # Snel en stabiel
+        
         stock = yf.Ticker(ticker)
-        hist = stock.history(period="6mo")
+        hist = stock.history(period="3mo")
         info = stock.info
         
-        if hist.empty: return "Geen data."
+        if hist.empty: return "Geen koersdata gevonden."
         
-        # Bereken heading voor AI context
-        recent_closes = hist['Close'].tail(5).tolist()
-        trend_context = "Stijgend" if recent_closes[-1] > recent_closes[0] else "Dalend"
+        trend = "Stijgend" if hist['Close'].iloc[-1] > hist['Close'].iloc[0] else "Dalend"
         
         prompt = f"""
-        Je bent een professionele kwantitatieve analist. 
-        De gebruiker overweegt aandeel {ticker} ({info.get('longName')}).
+        Jij bent een strenge aandelenanalist. Analyseer {ticker} ({info.get('longName', 'Onbekend')}).
         
-        BELANGRIJKE CONTEXT:
-        1. Markt Regime (Global Exit): De brede markt is momenteel in een {market_status} fase (t.o.v. 200-daags gemiddelde).
-           Als dit BEAR is, wees dan zeer kritisch en adviseer voorzichtigheid/cash.
-        2. Sector: {info.get('sector', 'Onbekend')}.
-        3. Trend (kort): {trend_context}.
-
-        Geef advies op basis van "Relative Strength" principes:
-        - Fundamentele check (zeer kort).
-        - Technische check (Is er relatieve sterkte?).
-        - CONCLUSIE: KOPEN, HOUDEN of VERKOPEN (Houd rekening met het Markt Regime!).
+        HARDE DATA:
+        1. Markt Regime (Hoofdindex): {market_status}. (Als BEAR: Wees zeer negatief).
+        2. Sector: {sector}.
+        3. Korte termijn trend: {trend}.
+        
+        GEEF ADVIES IN HET NEDERLANDS:
+        - Analyseer kort de fundamentele waardering (K/W, groei).
+        - Analyseer de Relative Strength t.o.v. de markt.
+        - CONCLUSIE: KOPEN / HOUDEN / VERKOPEN.
         """
         
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.choices[0].message.content
+        response = model.generate_content(prompt)
+        return response.text
     except Exception as e:
-        return f"Fout: {str(e)}"
+        return f"Gemini Error: {e}"
 
 # --- UI OPBOUW ---
 
-# 1. SIDEBAR: GLOBAL SETTINGS & MARKET REGIME
+# SIDEBAR
 st.sidebar.header("⚙️ Instellingen")
+sel_market_key = st.sidebar.selectbox("Kies Universum", list(MARKETS.keys()))
+current_market = MARKETS[sel_market_key]
+market_code = current_market['code']
+benchmark_ticker = current_market['benchmark']
 
-# Markt Keuze
-market_options = {
-    "🇺🇸 USA (S&P 400 MidCap)": "SP400",
-    "🇳🇱 Nederland (AEX/AMX)": "NL",
-    "🇧🇪 België (BEL 20)": "BE"
-}
-selected_market_label = st.sidebar.selectbox("Kies Markt", list(market_options.keys()))
-market_code = market_options[selected_market_label]
-
-# API Key
-api_key = st.sidebar.text_input("OpenAI Key (Optioneel)", type="password")
+gemini_key = st.sidebar.text_input("Google Gemini Key", type="password")
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🌍 Markt Regime (Global Filter)")
-
-# Bepaal benchmark voor traffic light
-check_ticker = BENCHMARK_US if market_code == "SP400" else ("^AEX" if market_code == "NL" else "^BFX")
-regime, price, sma = calculate_market_regime(check_ticker)
-
-if regime == "BULL":
-    st.sidebar.success(f"✅ BULL MARKT\n\nKoers ({price:.0f}) > 200 SMA ({sma:.0f}).\nHet is veilig om long posities te openen.")
+st.sidebar.subheader("🚦 Markt Regime")
+regime_status, r_price, r_sma = calculate_market_regime(benchmark_ticker)
+if regime_status == "BULL":
+    st.sidebar.success(f"✅ VEILIG (Bull)\nIndex > 200 SMA")
 else:
-    st.sidebar.error(f"⛔ BEAR MARKT\n\nKoers ({price:.0f}) < 200 SMA ({sma:.0f}).\nADVIES: Cash is king. Geen nieuwe aankopen.")
+    st.sidebar.error(f"⛔ GEVAAR (Bear)\nIndex < 200 SMA")
 
-# --- MAIN CONTENT ---
-st.title(f"🧭 Scientific Market Screener")
+# HOOFD SCHERM
+st.title(f"🧭 Market Screener: {market_code}")
 
-# DATA LADEN
-tickers_to_scan = []
-sector_df = pd.DataFrame()
+# 1. Data ophalen (Tickers + Sectoren)
+with st.spinner(f"Laden van {sel_market_key}..."):
+    constituents_df = get_market_constituents(market_code)
+    
+    if constituents_df.empty:
+        st.error("Kon lijst met aandelen niet laden. Check je internet of bron.")
+        st.stop()
+        
+    all_tickers = constituents_df['Ticker'].tolist()
 
-if market_code == "SP400":
-    sp400_df = get_sp400_data()
-    if not sp400_df.empty:
-        tickers_to_scan = sp400_df['Ticker'].tolist()
-        sector_df = sp400_df
-elif market_code == "NL":
-    tickers_to_scan = ["ASML.AS", "UNA.AS", "HEIA.AS", "SHELL.AS", "AD.AS", "INGA.AS", "DSM.AS", "ABN.AS", "KPN.AS", "WKL.AS", "RAND.AS", "BESI.AS", "ADYEN.AS", "IMCD.AS"]
-elif market_code == "BE":
-    tickers_to_scan = ["KBC.BR", "UCB.BR", "SOLB.BR", "ACKB.BR", "ARGX.BR", "UMI.BR", "GBL.BR", "COFB.BR", "WDP.BR", "ELI.BR", "AED.BR"]
-
-# TABS
-tab0, tab1, tab2, tab3 = st.tabs(["ℹ️ Info & Strategie", "📊 Sector RRG", "🏆 Aandelen Ranking", "🤖 AI Analist"])
+# 2. Tabs
+tab0, tab1, tab2, tab3 = st.tabs(["ℹ️ Info", "📊 Sector Analyse", "🏆 Ranking & Filter", "🤖 AI Advies"])
 
 # TAB 0: INFO
 with tab0:
     st.markdown("""
-    ### Over deze Applicatie
-    Deze tool is gebaseerd op wetenschappelijke literatuur over **Momentum** en **Relative Strength** (RS), met name het werk van *Mebane Faber* (Trend Following) en *Dorsey Wright* (Point & Figure RS).
+    ### 📚 Handleiding
+    1.  **Universum:** Kies links je markt (S&P 500, BEL 20, etc.).
+    2.  **Markt Regime:** Check het stoplicht links. Rood = Cash is King (niet kopen).
+    3.  **Sector Analyse:** Kijk in Tab 1 welke sectoren 'Leading' zijn (Rechtsboven).
+    4.  **Filter:** Ga naar Tab 2, filter op de sterke sector en kies de sterkste aandelen.
     
-    Het doel is om objectief te identificeren welke sectoren en aandelen beter presteren dan de markt.
-    
-    ### ⚠️ Belangrijke Risico's & Beperkingen
-    1.  **Marktregime (Cruciaal):** Gebruik deze tool **alleen** als de 'Global Filter' in de sidebar op groen (BULL) staat. Zoals Faber stelt: *"You want to be in the market when it is above the 10-month SMA."*
-    2.  **Transactiekosten & Turnover:** Rotatiestrategieën hebben een hoge omloopsnelheid. Dit kan winsten uithollen.
-        * *Advies:* Gebruik een **Sell Filter**. Verkoop een aandeel niet direct als het van nummer 1 naar 2 zakt, maar pas als het uit de top 20% valt. Dit vermindert onnodige handel.
-    3.  **Methodiek:** Deze app gebruikt "External RS" (Aandeel vs Benchmark). De zuiverdere "RS Matrix" (elk aandeel vs elk ander aandeel) is rekenkundig te zwaar voor deze web-omgeving, maar de huidige methode is een sterke benadering.
-    
-    ### Hoe gebruik ik dit?
-    1.  **Check de Sidebar:** Is het een Bull Markt? Zo nee -> Niets doen.
-    2.  **Sector RRG (Tab 2):** Zoek naar sectoren in het groene vlak (Leading) of blauwe vlak (Improving) die naar rechtsboven bewegen (NorthEast Heading).
-    3.  **Ranking (Tab 3):** Filter op die sterke sectoren. Zoek aandelen met een hoge Score én voldoende 'Distance' (Alpha potentieel).
-    4.  **AI Check (Tab 4):** Laat de AI een fundamentele sanity-check doen.
+    **Disclaimer:** Gebaseerd op momentum strategieën. Resultaten uit het verleden bieden geen garantie.
     """)
 
-# TAB 1: RRG
+# TAB 1: RRG (SECTOR ANALYSE)
 with tab1:
-    st.subheader(f"Sector Rotatie & Heading")
-    st.caption("Focus op bollen met een 'staart' die naar rechtsboven wijst (45°-90°).")
+    st.subheader("Relative Rotation Graph (RRG)")
     
-    if market_code == "SP400":
-        sector_tickers = list(SECTOR_MAP.values())
-        with st.spinner('Sector data & headings berekenen...'):
-            sector_data = get_price_data(sector_tickers + [BENCHMARK_US])
-        
-        if not sector_data.empty:
-            rrg_df = calculate_rrg_metrics(sector_data, BENCHMARK_US)
-            if not rrg_df.empty:
-                
-                fig = px.scatter(rrg_df, x="RS-Ratio", y="RS-Momentum", 
-                                 color="Kwadrant", text="Naam", 
-                                 size="Distance", # Grotere bol = meer alpha potentie
-                                 hover_data=["Heading"],
-                                 title=f"RRG Sectoren (Grootte = Alpha Potentieel)", height=650,
-                                 color_discrete_map={
-                                     "LEADING 🟢": "#00cc00", "WEAKENING 🟡": "#ffaa00",
-                                     "LAGGING 🔴": "#ff0000", "IMPROVING 🔵": "#0000ff"
-                                 })
-                
-                # Assen en lijnen
-                fig.add_hline(y=100, line_dash="dash", line_color="gray")
-                fig.add_vline(x=100, line_dash="dash", line_color="gray")
-                fig.add_shape(type="rect", x0=100, y0=100, x1=115, y1=115, fillcolor="green", opacity=0.1, line_width=0)
-                
-                # Pijl voor ideale heading (45 graden)
-                fig.add_annotation(x=110, y=110, text="Ideal Heading ↗️", showarrow=False, font=dict(color="green"))
-                
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.warning("Onvoldoende data.")
+    rrg_tickers = []
+    
+    # LOGICA: 
+    # Voor US Markten -> Toon Sector ETFs (Overzichtelijker)
+    # Voor NL/BE Markten -> Toon individuele aandelen ingekleurd per sector (Want geen ETFs)
+    if market_code in ["SP500", "SP400"]:
+        st.info("We tonen hier de US Sector ETF's t.o.v. de index.")
+        rrg_tickers = list(US_SECTOR_ETFS.values())
+        color_col = "Kwadrant" # Kleur op basis van fase
     else:
-        st.info("Sector analyse is geoptimaliseerd voor US data.")
+        st.info(f"We tonen alle {market_code} aandelen t.o.v. de index.")
+        rrg_tickers = all_tickers
+        color_col = "Sector" # Kleur op basis van sector (zodat je clusters ziet)
 
-# TAB 2: RANKING
-with tab2:
-    st.subheader(f"Momentum Ranking & Selectie")
+    # Data ophalen
+    rrg_data_raw = get_price_data(rrg_tickers + [benchmark_ticker])
     
-    active_tickers = tickers_to_scan
-    
-    # Sector Filter
-    if market_code == "SP400" and not sector_df.empty:
-        sectors = sorted(sector_df['Sector'].unique().tolist())
-        sel_sector = st.selectbox("Filter op Industrie:", ["Alle Sectoren"] + sectors)
-        if sel_sector != "Alle Sectoren":
-            active_tickers = sector_df[sector_df['Sector'] == sel_sector]['Ticker'].tolist()
-            st.success(f"Selectie: {len(active_tickers)} aandelen.")
-
-    if st.button("🚀 Start Analyse"):
-        if regime == "BEAR":
-            st.warning("⚠️ WAARSCHUWING: De markt is in een downtrend. Aankopen worden afgeraden.")
+    if not rrg_data_raw.empty:
+        rrg_metrics = calculate_rrg_metrics(rrg_data_raw, benchmark_ticker)
+        
+        if not rrg_metrics.empty:
+            # Als we in NL/BE mode zijn, moeten we de Sector kolom toevoegen aan de RRG data
+            if market_code in ["NL", "BE"]:
+                rrg_metrics = rrg_metrics.merge(constituents_df, on='Ticker', how='left')
+                # Vul lege sectoren
+                rrg_metrics['Sector'] = rrg_metrics['Sector'].fillna('Overig')
             
-        with st.spinner(f"Analyseren van {len(active_tickers)} aandelen..."):
-            stock_data = get_price_data(active_tickers)
+            
+            fig = px.scatter(
+                rrg_metrics, 
+                x="RS-Ratio", 
+                y="RS-Momentum", 
+                color=color_col if market_code in ["SP500", "SP400"] else "Sector", # Wisselende kleurstrategie
+                text="Naam" if market_code in ["SP500", "SP400"] else "Ticker",
+                size="Distance",
+                hover_data=["Kwadrant", "Heading"],
+                title=f"RRG: {market_code} vs {benchmark_ticker}",
+                height=700
+            )
+            
+            # Opmaak RRG
+            fig.add_hline(y=100, line_dash="dash", line_color="gray")
+            fig.add_vline(x=100, line_dash="dash", line_color="gray")
+            fig.add_shape(type="rect", x0=100, y0=100, x1=115, y1=115, fillcolor="green", opacity=0.1, line_width=0)
+            
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("Niet genoeg data voor RRG berekening.")
+
+# TAB 2: RANKING & FILTER
+with tab2:
+    st.subheader("🔍 Stock Screener")
+    
+    # 1. SECTOR FILTER (Werkt nu voor ALLE markten)
+    available_sectors = sorted(constituents_df['Sector'].dropna().unique().tolist())
+    selected_sector = st.selectbox("📂 Filter op Sector:", ["Alle Sectoren"] + available_sectors)
+    
+    # Filter toepassen
+    if selected_sector != "Alle Sectoren":
+        filtered_tickers = constituents_df[constituents_df['Sector'] == selected_sector]['Ticker'].tolist()
+        st.success(f"Geselecteerd: {selected_sector} ({len(filtered_tickers)} aandelen)")
+    else:
+        filtered_tickers = all_tickers
+
+    # 2. RUN KNOP
+    if st.button("🚀 Start Analyse"):
+        if regime_status == "BEAR":
+            st.warning("⚠️ Let op: De markt is in een downtrend (Bear).")
+            
+        with st.spinner("Koersdata ophalen en rankings berekenen..."):
+            stock_data = get_price_data(filtered_tickers)
+            
             if not stock_data.empty:
                 rank_df = calculate_ranking(stock_data)
+                
                 if not rank_df.empty:
-                    st.session_state['top_stock'] = rank_df.iloc[0]['Ticker']
+                    # Top aandeel opslaan voor AI
+                    st.session_state['top_pick'] = rank_df.iloc[0]['Ticker']
                     
-                    # Style de tabel
+                    # Merge met sector info voor de tabel
+                    display_df = rank_df.merge(constituents_df, on='Ticker', how='left')
+                    
+                    # Tabel tonen
                     st.dataframe(
-                        rank_df.style.format({
+                        display_df.style.format({
                             'Prijs': '{:.2f}', '1M %': '{:+.1f}%', 
                             '3M %': '{:+.1f}%', '6M %': '{:+.1f}%', 'Score': '{:.1f}'
                         }).background_gradient(subset=['Score'], cmap='RdYlGn'),
                         use_container_width=True, height=600
                     )
                 else:
-                    st.warning("Geen data.")
+                    st.error("Geen rankings kunnen genereren.")
+            else:
+                st.error("Geen data gevonden voor deze selectie.")
 
 # TAB 3: AI
 with tab3:
-    st.subheader("🤖 AI Risk Manager")
+    st.subheader("🤖 Gemini 1.5 Second Opinion")
     
     col1, col2 = st.columns([1, 2])
     with col1:
-        def_ticker = st.session_state.get('top_stock', "")
-        user_ticker = st.text_input("Ticker", value=def_ticker)
+        default_val = st.session_state.get('top_pick', "")
+        user_ticker = st.text_input("Ticker Symbool", value=default_val)
         
-        # Geef visuele feedback over het marktregime aan de gebruiker
-        if regime == "BULL":
-            st.success("Marktlicht: GROEN (Kopen mag)")
-        else:
-            st.error("Marktlicht: ROOD (Pas op!)")
-            
-        analyze_btn = st.button("Vraag Advies")
-    
-    with col2:
-        if analyze_btn:
-            with st.spinner("AI analyseert marktomstandigheden en aandeel..."):
-                advies = get_ai_advice(user_ticker, api_key, regime)
+        # Sector ophalen voor context
+        ticker_sector = "Onbekend"
+        if user_ticker:
+            row = constituents_df[constituents_df['Ticker'] == user_ticker]
+            if not row.empty:
+                ticker_sector = row.iloc[0]['Sector']
+        
+        if st.button("Vraag Advies"):
+            with st.spinner("Gemini analyseert..."):
+                advies = get_gemini_advice(user_ticker, gemini_key, regime_status, ticker_sector)
                 st.markdown(advies)
+                st.caption("Gegenereerd door Google Gemini 1.5 Flash")
