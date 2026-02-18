@@ -2,13 +2,12 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import google.generativeai as genai
 import requests
 import numpy as np
 
 # --- CONFIGURATIE ---
-st.set_page_config(page_title="Industry Screener 3.0 (Tactical)", layout="wide", page_icon="⚔️")
+st.set_page_config(page_title="Industry Screener 3.1 (Fixed)", layout="wide", page_icon="⚔️")
 
 # --- 1. DATA DEFINITIES ---
 
@@ -33,7 +32,9 @@ US_SECTOR_ETFS = {
     'Comm Services': 'XLC', 'Staples': 'XLP'
 }
 
-# Gecombineerde statische lijst voor snelheid en stabiliteit
+# Omgekeerde mapping voor de grafiek labels (Code -> Naam)
+ETF_TO_NAME = {v: k for k, v in US_SECTOR_ETFS.items()}
+
 STATIC_EU_DATA = {
     "ASML.AS": "Technology", "UNA.AS": "Staples", "HEIA.AS": "Staples", "SHELL.AS": "Energy", 
     "AD.AS": "Staples", "INGA.AS": "Financials", "DSM.AS": "Materials", "BESI.AS": "Technology", 
@@ -54,7 +55,6 @@ COLOR_MAP = {
 def get_market_constituents(market_code):
     if "USA" in market_code:
         current_market = next(v for k, v in MARKETS.items() if v['code'] == MARKETS[k]['code'] and k.startswith("🇺🇸"))
-        # Fallback logic voor de juiste key
         for k, v in MARKETS.items():
             if v['code'] == market_code: 
                 url = v['wiki_url']
@@ -75,7 +75,6 @@ def get_market_constituents(market_code):
         return pd.DataFrame(list(STATIC_EU_DATA.items()), columns=['Ticker', 'Sector'])
 
 def clean_yfinance_data(df):
-    """Robuuste cleanup voor MultiIndex."""
     if isinstance(df.columns, pd.MultiIndex):
         if 'Close' in df.columns.get_level_values(0):
             df = df['Close']
@@ -96,7 +95,7 @@ def calculate_market_regime(ticker):
     try:
         df = yf.download(ticker, period="2y", progress=False, auto_adjust=True)
         df = clean_yfinance_data(df)
-        if isinstance(df, pd.DataFrame): df = df.iloc[:, 0] # Series forceren
+        if isinstance(df, pd.DataFrame): df = df.iloc[:, 0]
         
         curr = df.iloc[-1]
         sma = df.rolling(200).mean().iloc[-1]
@@ -105,48 +104,33 @@ def calculate_market_regime(ticker):
         return "UNKNOWN", pd.Series()
 
 def calculate_dispersion(tickers):
-    """Berekent de standaarddeviatie van rendementen in de markt."""
     try:
         data = get_price_data(tickers)
         if data.empty: return 0, "Onbekend"
-        
-        # 3-maands rendement per aandeel
         returns = (data.iloc[-1] / data.shift(63).iloc[-1]) - 1
-        std_dev = returns.std() * 100 # In procenten
+        std_dev = returns.std() * 100 
         
         if std_dev < 5: status = "Laag (Kuddegedrag)"
         elif std_dev < 10: status = "Neutraal"
         else: status = "Hoog (Stock Pickers Markt)"
-        
         return std_dev, status
     except:
         return 0, "Error"
 
 def calculate_rs_matrix_score(df_prices):
-    """
-    ⚔️ TOERNOOI MODEL (RS MATRIX)
-    Vergelijkt elk aandeel met elk ander aandeel.
-    Winnaar = Aandeel dat de meeste 1-op-1 duels wint op basis van Relatieve Sterkte.
-    """
     tickers = df_prices.columns.tolist()
     n = len(tickers)
     if n < 2: return pd.DataFrame()
 
-    # Bereken 3-maands momentum voor iedereen (snelle proxy voor RS)
-    # In een echte P&F matrix gebruik je X/O charts, hier gebruiken we genormaliseerd momentum
     momentum = (df_prices.iloc[-1] / df_prices.shift(63).iloc[-1]) - 1
-    
-    # Pairwise comparison
     scores = {t: 0 for t in tickers}
     
     for t1 in tickers:
         for t2 in tickers:
             if t1 == t2: continue
-            # Als T1 sterker is dan T2, krijgt T1 een punt
             if momentum[t1] > momentum[t2]:
                 scores[t1] += 1
                 
-    # Normaliseren naar een score van 0 tot 100
     max_score = n - 1
     results = []
     for t, score in scores.items():
@@ -178,8 +162,13 @@ def calculate_rrg_metrics(df, benchmark):
             elif curr_r < 100 and curr_m < 100: status = "3. LAGGING"
             else: status = "2. WEAKENING"
             
+            # Label bepalen (Naam ipv Ticker indien mogelijk)
+            label_name = ETF_TO_NAME.get(col, col)
+            
             rrg_list.append({
-                'Ticker': col, 'RS-Ratio': curr_r, 'RS-Momentum': curr_m,
+                'Ticker': col, 
+                'Naam': label_name, # Hier pakken we de volledige naam
+                'RS-Ratio': curr_r, 'RS-Momentum': curr_m,
                 'Kwadrant': status, 'Distance': np.sqrt((curr_r - 100)**2 + (curr_m - 100)**2)
             })
         except: continue
@@ -190,27 +179,12 @@ def get_actionable_advice(ticker, key, market_info, metrics):
     try:
         genai.configure(api_key=key)
         model = genai.GenerativeModel('gemini-1.5-pro') 
-        
         prompt = f"""
         Je bent een Hedge Fund Manager. Geef een BINDEND advies voor {ticker}.
-        
-        MARKTDATA:
-        - Markt Regime: {market_info['regime']} (Belangrijk!)
-        - Markt Dispersie: {market_info['dispersion']}
-        
-        AANDEEL DATA:
-        - Matrix Score (0-100): {metrics['matrix_score']:.1f} (Boven 80 is topklasse)
-        - Ranking in Sector: #{metrics['rank']} van {metrics['total_peers']}
-        - RRG Fase: {metrics['rrg_stage']}
-        
-        LOGICA:
-        1. Als Markt = BEAR, wees zeer terughoudend met KOPEN, tenzij Matrix Score > 90 (Absolute leider).
-        2. Als Ranking in top 3 zit: Overweeg KOPEN.
-        3. Als Ranking zakt (bv. plek 6+): Overweeg VERKOPEN/ROTATIE.
-        
-        VRAAG:
-        Geef een eindoordeel: "STERK KOPEN", "KOPEN", "HOUDEN", "VERKOPEN".
-        Onderbouw kort met de data. Max 5 regels.
+        MARKTDATA: Regime: {market_info['regime']}, Dispersie: {market_info['dispersion']}
+        AANDEEL DATA: Matrix Score (0-100): {metrics['matrix_score']:.1f}, Rank: #{metrics['rank']}
+        LOGICA: BEAR Market = Terughoudend. Top 3 Rank = Kopen. Rank 6+ = Verkopen.
+        VRAAG: Geef eindoordeel: "STERK KOPEN", "KOPEN", "HOUDEN", "VERKOPEN". Max 5 regels.
         """
         response = model.generate_content(prompt)
         return response.text
@@ -220,32 +194,28 @@ def get_actionable_advice(ticker, key, market_info, metrics):
 # --- 3. UI LAYOUT ---
 
 # SIDEBAR
-st.sidebar.title("⚔️ Screener 3.0")
+st.sidebar.title("⚔️ Screener 3.1")
 sel_market_key = st.sidebar.selectbox("Market", list(MARKETS.keys()))
 cur_mkt = MARKETS[sel_market_key]
 api_key = st.sidebar.text_input("Gemini API Key", type="password")
 
 st.sidebar.markdown("---")
-# 1. MARKET REGIME
 regime, regime_data = calculate_market_regime(cur_mkt['benchmark'])
 if regime == "BULL":
     st.sidebar.success(f"🚦 FILTER: {regime}\n(Long posities toegestaan)")
 else:
     st.sidebar.error(f"🚦 FILTER: {regime}\n(Cash is King / Hedging)")
 
-# 2. DISPERSION METER (NEW)
 st.sidebar.markdown("---")
 st.sidebar.write("📊 **Dispersie Meter**")
 if "USA" in sel_market_key:
     disp_tickers = list(US_SECTOR_ETFS.values())
 else:
-    disp_tickers = list(STATIC_EU_DATA.keys())[:10] # Sample
+    disp_tickers = list(STATIC_EU_DATA.keys())[:10]
     
 disp_val, disp_status = calculate_dispersion(disp_tickers)
-st.sidebar.progress(min(disp_val/20, 1.0)) # Scale max approx 20%
+st.sidebar.progress(min(disp_val/20, 1.0))
 st.sidebar.caption(f"Score: {disp_val:.1f}% - {disp_status}")
-if disp_val < 5:
-    st.sidebar.warning("⚠️ Lage dispersie: Rotatie werkt minder goed.")
 
 # MAIN CONTENT
 st.title(f"Tactical Industry Screener: {cur_mkt['code']}")
@@ -254,7 +224,30 @@ with st.spinner("Loading Assets..."):
     constituents = get_market_constituents(cur_mkt['code'])
     all_tickers = constituents['Ticker'].tolist()
 
-tab1, tab2, tab3 = st.tabs(["🚁 Helicopter View (RRG)", "⚔️ Matrix & Signals", "🤖 AI Final Call"])
+# TABBLADEN: Info is terug!
+tab0, tab1, tab2, tab3 = st.tabs(["ℹ️ Info", "🚁 Helicopter View (RRG)", "⚔️ Matrix & Signals", "🤖 AI Final Call"])
+
+# TAB 0: INFO
+with tab0:
+    st.markdown("""
+    ### ℹ️ Hoe werkt dit dashboard?
+    
+    **1. Markt Regime (Sidebar)**
+    * 🟢 **BULL:** De markt zit boven de 200-dagen lijn. Veilig om te kopen.
+    * 🔴 **BEAR:** De markt zit eronder. Pas op, verhoog cash positie.
+
+    **2. RRG (Relative Rotation Graph)**
+    * Dit toont de rotatie van sectoren of aandelen t.o.v. de benchmark.
+    * 🟢 **LEADING:** Sterke trend + Momentum (Kopen)
+    * 🟠 **WEAKENING:** Trend zwakt af (Winst nemen?)
+    * 🔴 **LAGGING:** Slechte trend + Momentum (Afblijven/Short)
+    * 🍏 **IMPROVING:** Trend draait bij (Kansen zoeken)
+    
+    **3. Matrix Score (Tab 2)**
+    * Elk aandeel vecht 1-tegen-1 met alle andere aandelen in de sector.
+    * Een score van **100** betekent dat het aandeel sterker is dan *alle* andere.
+    * **Strategie:** Koop de Top 3, verkoop alles buiten de Top 6.
+    """)
 
 # TAB 1: RRG
 with tab1:
@@ -262,42 +255,39 @@ with tab1:
     if "USA" in sel_market_key:
         plot_tickers = list(US_SECTOR_ETFS.values())
     else:
-        plot_tickers = all_tickers[:30] # Limit for speed
+        plot_tickers = all_tickers[:30] 
         
     prices = get_price_data(plot_tickers + [cur_mkt['benchmark']])
     if not prices.empty:
         rrg = calculate_rrg_metrics(prices, cur_mkt['benchmark'])
         if not rrg.empty:
             fig = px.scatter(rrg, x="RS-Ratio", y="RS-Momentum", color="Kwadrant", 
-                             text="Ticker", size="Distance", color_discrete_map=COLOR_MAP,
-                             title="Relative Rotation Graph", height=600)
-            fig.update_traces(textposition='top center')
+                             text="Naam", # AANGEPAST: Nu de Naam ipv Ticker
+                             size="Distance", color_discrete_map=COLOR_MAP,
+                             title="Relative Rotation Graph", height=650)
+            
+            # Betere styling voor leesbaarheid
+            fig.update_traces(textposition='top center', textfont=dict(family="Arial Black", size=12))
             fig.add_hline(y=100, line_dash="dash", line_color="grey")
-            fig.add_vline(x=100, line_dash="dash", line_color="grey") 
+            fig.add_vline(x=100, line_dash="dash", line_color="grey")
+            
             st.plotly_chart(fig, use_container_width=True)
 
-# TAB 2: MATRIX & SIGNALS
+# TAB 2: MATRIX
 with tab2:
     st.subheader("🎯 Sector Drill-down & Buy/Sell Logic")
-    
     sectors = sorted(constituents['Sector'].unique().tolist())
     sel_sector = st.selectbox("Selecteer Sector voor Analyse:", sectors)
     
     if st.button("Start Toernooi Analyse"):
         sector_tickers = constituents[constituents['Sector'] == sel_sector]['Ticker'].tolist()
-        
         with st.spinner(f"vechten {len(sector_tickers)} aandelen het uit..."):
             sec_prices = get_price_data(sector_tickers)
-            
             if not sec_prices.empty and len(sector_tickers) > 1:
-                # MATRIX BEREKENING
                 matrix_df = calculate_rs_matrix_score(sec_prices)
-                
-                # Voeg prijs data toe voor context
                 last_prices = sec_prices.iloc[-1].to_frame(name="Prijs")
                 final_df = matrix_df.merge(last_prices, left_on="Ticker", right_index=True)
                 
-                # SIGNAAL LOGICA TOEVOEGEN
                 def determine_signal(rank):
                     if rank <= 3: return "🟢 BUY"
                     elif rank <= 5: return "🟡 HOLD"
@@ -306,17 +296,13 @@ with tab2:
                 final_df['Rank'] = range(1, len(final_df) + 1)
                 final_df['Actie'] = final_df['Rank'].apply(determine_signal)
                 
-                # Opslaan voor AI Tab
                 if not final_df.empty:
                     st.session_state['top_stock'] = final_df.iloc[0]['Ticker']
                     st.session_state['top_score'] = final_df.iloc[0]['Matrix_Power']
                     st.session_state['top_rank'] = 1
                     st.session_state['total_peers'] = len(final_df)
                 
-                # VISUALISATIE
                 st.markdown(f"### 🏆 Winnaars in {sel_sector}")
-                st.caption("Gebaseerd op 1-tegen-1 relatieve sterkte duels (Matrix Logic)")
-                
                 st.dataframe(
                     final_df[['Rank', 'Actie', 'Ticker', 'Matrix_Power', 'Prijs']]
                     .style.map(lambda x: 'color: green; font-weight: bold' if x == "🟢 BUY" else 
@@ -324,29 +310,19 @@ with tab2:
                     .format({'Matrix_Power': '{:.1f}', 'Prijs': '{:.2f}'}),
                     use_container_width=True, height=600
                 )
-            else:
-                st.error("Te weinig data of aandelen in deze sector.")
 
-# TAB 3: AI CALL
+# TAB 3: AI
 with tab3:
     st.subheader("👨‍💼 De Portfolio Manager")
-    
     col_in, col_res = st.columns([1, 2])
     with col_in:
         t_input = st.text_input("Ticker om te beoordelen:", value=st.session_state.get('top_stock', ''))
-        st.info("Tip: Gebruik de ticker uit de Matrix tabel.")
-        
         if st.button("Vraag Oordeel"):
-            # Verzamel metrics (mockup als niet uit tabel komt)
             metrics = {
                 'matrix_score': st.session_state.get('top_score', 50),
-                'rank': st.session_state.get('top_rank', 5),
-                'total_peers': st.session_state.get('total_peers', 10),
-                'rrg_stage': "Unknown"
+                'rank': st.session_state.get('top_rank', 5)
             }
-            
             mkt_info = {'regime': regime, 'dispersion': disp_status}
-            
             with st.spinner("Analyseren..."):
                 advice = get_actionable_advice(t_input, api_key, mkt_info, metrics)
                 st.markdown(advice)
