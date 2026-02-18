@@ -317,7 +317,7 @@ with tab1:
     * 🍏 **IMPROVING:** Zwakke trend, toenemend momentum. (Speculative Buy)
     """)
 
-# === TAB 2: SECTOREN (Gecorrigeerd voor nieuwe RRG functie) ===
+# === TAB 2: SECTOREN (Gecorrigeerd: RGBA kleuren fix) ===
 with tab2:
     if st.session_state.get('active'):
         st.subheader("Sector Rotatie")
@@ -336,7 +336,7 @@ with tab2:
                 calc_tickers = list(set(tickers + [market_cfg['benchmark']]))
                 df_sec = get_price_data(calc_tickers)
                 
-                # Check marktregime voor de functie (nodig voor Action bepaling)
+                # Check marktregime voor de functie
                 market_bull = True
                 if market_cfg['benchmark'] in df_sec.columns:
                     b_series = df_sec[market_cfg['benchmark']]
@@ -357,7 +357,7 @@ with tab2:
 
                     # 3. Visualisatie
                     
-                    # Kleurenschaal (Hetzelfde als Tab 3)
+                    # Kleurenschaal
                     custom_color_scale = [
                         (0.00, "#e5e7eb"),  # 0°
                         (0.125, "#00ff00"), # 45°  : FEL GROEN (Max Power)
@@ -366,8 +366,6 @@ with tab2:
                         (1.00, "#450a0a")   # 360°
                     ]
 
-                    # --- DE FIX ZIT HIER ---
-                    # We gebruiken nu 'Alpha_Score' en 'Action' in hover_data ipv 'Power_Heading'
                     fig = px.scatter(
                         rrg_sec, 
                         x="RS-Ratio", 
@@ -376,7 +374,7 @@ with tab2:
                         text="Label",  # Sector naam
                         size="Alpha_Score", # Grootte = Kracht
                         height=650,
-                        hover_data=["Kwadrant", "Action", "Distance"], # AANGEPAST
+                        hover_data=["Kwadrant", "Action", "Distance"],
                         title=f"<b>SECTOR ROTATIE</b> <br><sup>Focus op 45° (Fel Groen) | Grootte bol = Alpha Score</sup>"
                     )
                     
@@ -401,9 +399,22 @@ with tab2:
                         margin=dict(t=60, b=40, l=40, r=40)
                     )
                     
-                    # Watermerken
-                    fig.add_annotation(x=101, y=101, text="LEADING", showarrow=False, font=dict(size=14, color="green", opacity=0.3))
-                    fig.add_annotation(x=99, y=99, text="LAGGING", showarrow=False, font=dict(size=14, color="red", opacity=0.3))
+                    # --- DE FIX ZIT HIER (Watermerken) ---
+                    # Gebruik rgba(R, G, B, Alpha) in plaats van opacity parameter
+                    
+                    fig.add_annotation(
+                        x=101, y=101, 
+                        text="LEADING", 
+                        showarrow=False, 
+                        font=dict(size=14, color="rgba(0, 128, 0, 0.3)") # Groen met 0.3 transparantie
+                    )
+                    
+                    fig.add_annotation(
+                        x=99, y=99, 
+                        text="LAGGING", 
+                        showarrow=False, 
+                        font=dict(size=14, color="rgba(255, 0, 0, 0.3)") # Rood met 0.3 transparantie
+                    )
 
                     # Centreren
                     max_dev = max(abs(rrg_sec['RS-Ratio']-100).max(), abs(rrg_sec['RS-Momentum']-100).max()) * 1.1
@@ -415,7 +426,6 @@ with tab2:
                     # --- MINI TABEL ---
                     st.markdown("#### 🏆 Sector Ranking (Alpha Score)")
                     
-                    # Sorteer op de nieuwe Alpha_Score
                     top_sec = rrg_sec.sort_values('Alpha_Score', ascending=False)
                     
                     st.dataframe(
