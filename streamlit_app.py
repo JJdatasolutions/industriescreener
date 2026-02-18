@@ -317,7 +317,7 @@ with tab1:
     * 🍏 **IMPROVING:** Zwakke trend, toenemend momentum. (Speculative Buy)
     """)
 
-# === TAB 2: SECTOREN ===
+# === TAB 2: SECTOREN (Gecorrigeerd voor nieuwe RRG functie) ===
 with tab2:
     if st.session_state.get('active'):
         st.subheader("Sector Rotatie")
@@ -326,113 +326,102 @@ with tab2:
         with st.spinner("Sectoren analyseren..."):
             tickers = list(US_SECTOR_MAP.values()) if "USA" in st.session_state['market_key'] else []
             
-            # Fallback voor EU of als map leeg is
+            # Fallback
             if not tickers: 
                  constituents = get_market_constituents(st.session_state['market_key'])
                  tickers = constituents['Ticker'].head(15).tolist() if not constituents.empty else []
 
             if tickers:
-                # Benchmark toevoegen voor berekening
+                # Benchmark toevoegen
                 calc_tickers = list(set(tickers + [market_cfg['benchmark']]))
                 df_sec = get_price_data(calc_tickers)
-                rrg_sec = calculate_rrg_extended(df_sec, market_cfg['benchmark'])
+                
+                # Check marktregime voor de functie (nodig voor Action bepaling)
+                market_bull = True
+                if market_cfg['benchmark'] in df_sec.columns:
+                    b_series = df_sec[market_cfg['benchmark']]
+                    market_bull = b_series.iloc[-1] > b_series.rolling(200).mean().iloc[-1]
+
+                # BEREKENING (Met de NIEUWE functie)
+                rrg_sec = calculate_rrg_extended(df_sec, market_cfg['benchmark'], market_bullish=market_bull)
                 
                 if not rrg_sec.empty:
                     # 2. Labels en Cleaning
-                    # We maken een mooie naam (bijv 'Technology') ipv de ticker (XLK)
                     labels = {v: k for k, v in US_SECTOR_MAP.items()}
-                    # Map de ticker naar de naam, als die niet bestaat, gebruik de ticker
+                    # Map de ticker naar de naam
                     rrg_sec['Label'] = rrg_sec['Ticker'].map(labels).fillna(rrg_sec['Ticker'])
                     
-                    # Filter: Alleen de opgevraagde tickers (excl benchmark zelf soms)
+                    # Filter
                     rrg_sec = rrg_sec[rrg_sec['Ticker'].isin(tickers)]
                     rrg_sec = rrg_sec[rrg_sec['Distance'] > 0]
 
-                    # 3. Visualisatie (Exacte kopie van Tab 3 stijl)
+                    # 3. Visualisatie
                     
-                    # --- CUSTOM COLOR SCALE ---
-                    # 0-90 = Groen (met 45 als piek). >90 = Rood.
+                    # Kleurenschaal (Hetzelfde als Tab 3)
                     custom_color_scale = [
-                        # GROENE ZONE (0 - 90)
-                        (0.00, "#a7f3d0"),  # 0°   : Lichtgroen
-                        (0.125, "#065f46"), # 45°  : DONKERGROEN (Sweet Spot)
-                        (0.25, "#a7f3d0"),  # 90°  : Lichtgroen
-                        
-                        # RODE ZONE (91 - 360)
-                        (0.2501, "#fca5a5"), # 90.1°: Lichtrood
-                        (0.50, "#dc2626"),   # 180° : Rood
-                        (0.75, "#991b1b"),   # 270° : Donker Rood
-                        (1.00, "#450a0a")    # 360° : Zwart/Rood
+                        (0.00, "#e5e7eb"),  # 0°
+                        (0.125, "#00ff00"), # 45°  : FEL GROEN (Max Power)
+                        (0.25, "#10b981"),  # 90°
+                        (0.26, "#fca5a5"),  # >90° : Rood gebied start
+                        (1.00, "#450a0a")   # 360°
                     ]
 
+                    # --- DE FIX ZIT HIER ---
+                    # We gebruiken nu 'Alpha_Score' en 'Action' in hover_data ipv 'Power_Heading'
                     fig = px.scatter(
                         rrg_sec, 
                         x="RS-Ratio", 
                         y="RS-Momentum", 
                         color="Heading", 
-                        text="Label",  # Gebruik de leesbare Sector naam
-                        size="Distance",
+                        text="Label",  # Sector naam
+                        size="Alpha_Score", # Grootte = Kracht
                         height=650,
-                        hover_data=["Kwadrant", "Power_Heading"],
-                        title=f"<b>SECTOR ROTATIE</b> <br><sup>Focus op 45° (Donkergroen) | Vermijd Rood</sup>"
+                        hover_data=["Kwadrant", "Action", "Distance"], # AANGEPAST
+                        title=f"<b>SECTOR ROTATIE</b> <br><sup>Focus op 45° (Fel Groen) | Grootte bol = Alpha Score</sup>"
                     )
                     
                     # STYLING
                     fig.update_traces(
-                        marker=dict(
-                            line=dict(width=1, color='black'), 
-                            opacity=0.9
-                        ),
+                        marker=dict(line=dict(width=1, color='black'), opacity=0.9),
                         textposition='top center',
-                        textfont=dict(size=11, color='darkslategrey', family="Arial Black") # Iets dikkere tekst voor sectoren
+                        textfont=dict(size=11, color='darkslategrey', family="Arial Black")
                     )
                     
-                    # LAYOUT & KLEURENKAART
                     fig.update_layout(
-                        coloraxis_cmin=0,
-                        coloraxis_cmax=360,
+                        coloraxis_cmin=0, coloraxis_cmax=360,
                         coloraxis_colorscale=custom_color_scale,
                         coloraxis_colorbar=dict(
                             title="Richting",
-                            tickvals=[0, 45, 90, 180, 270],
-                            ticktext=["0°", "45° TOP", "90° Grens", "180°", "270°"]
+                            tickvals=[0, 45, 90, 225],
+                            ticktext=["0°", "45° (TOP)", "90°", "SW (Short)"]
                         ),
                         template="plotly_white",
-                        xaxis=dict(showgrid=True, gridcolor='#f2f2f2', zeroline=False), 
-                        yaxis=dict(showgrid=True, gridcolor='#f2f2f2', zeroline=False),
-                        plot_bgcolor='white',
-                        paper_bgcolor='white',
+                        xaxis=dict(showgrid=True, zeroline=True, zerolinecolor='black'), 
+                        yaxis=dict(showgrid=True, zeroline=True, zerolinecolor='black'),
                         margin=dict(t=60, b=40, l=40, r=40)
                     )
                     
-                    # Watermerken & Assen
-                    fig.add_hline(y=100, line_color="black", line_width=1)
-                    fig.add_vline(x=100, line_color="black", line_width=1)
-                    
-                    # Visuele tekst annotaties
-                    fig.add_annotation(x=101, y=101, text="BUY ZONE", showarrow=False, font=dict(size=14, color="#065f46"))
-                    fig.add_annotation(x=99, y=99, text="AVOID", showarrow=False, font=dict(size=14, color="#991b1b"))
+                    # Watermerken
+                    fig.add_annotation(x=101, y=101, text="LEADING", showarrow=False, font=dict(size=14, color="green", opacity=0.3))
+                    fig.add_annotation(x=99, y=99, text="LAGGING", showarrow=False, font=dict(size=14, color="red", opacity=0.3))
 
-                    # Centreren van de grafiek
+                    # Centreren
                     max_dev = max(abs(rrg_sec['RS-Ratio']-100).max(), abs(rrg_sec['RS-Momentum']-100).max()) * 1.1
                     fig.update_xaxes(range=[100-max_dev, 100+max_dev])
                     fig.update_yaxes(range=[100-max_dev, 100+max_dev])
 
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    # --- MINI TABEL (Optioneel maar handig) ---
-                    # Toon snel de beste sectoren onder de grafiek
-                    st.markdown("#### 🏆 Sector Ranking (Dichtst bij 45°)")
-                    df_view = rrg_sec.copy()
-                    df_view['Afwijking_45'] = abs(df_view['Heading'] - 45)
+                    # --- MINI TABEL ---
+                    st.markdown("#### 🏆 Sector Ranking (Alpha Score)")
                     
-                    # Sorteer op beste heading (dichtst bij 45)
-                    top_sec = df_view.sort_values('Afwijking_45', ascending=True)
+                    # Sorteer op de nieuwe Alpha_Score
+                    top_sec = rrg_sec.sort_values('Alpha_Score', ascending=False)
                     
                     st.dataframe(
-                        top_sec[['Label', 'Heading', 'Distance', 'Kwadrant']].style
-                        .background_gradient(subset=['Heading'], cmap='Greens', vmin=0, vmax=90)
-                        .format({"Heading": "{:.1f}°", "Distance": "{:.2f}"}),
+                        top_sec[['Label', 'Alpha_Score', 'Heading', 'Action']].style
+                        .background_gradient(subset=['Alpha_Score'], cmap='Greens')
+                        .format({"Heading": "{:.0f}°", "Alpha_Score": "{:.1f}"}),
                         hide_index=True,
                         use_container_width=True
                     )
