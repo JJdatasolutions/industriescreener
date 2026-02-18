@@ -7,7 +7,7 @@ import requests
 import numpy as np
 
 # --- CONFIGURATIE ---
-st.set_page_config(page_title="Pro Industry Screener 3.2", layout="wide", page_icon="⚔️")
+st.set_page_config(page_title="Pro Industry Screener 3.3", layout="wide", page_icon="⚔️")
 
 # --- 1. DATA DEFINITIES ---
 
@@ -32,7 +32,6 @@ US_SECTOR_ETFS = {
     'Comm Services': 'XLC', 'Staples': 'XLP'
 }
 
-# Mapping voor labels
 ETF_TO_NAME = {v: k for k, v in US_SECTOR_ETFS.items()}
 
 STATIC_EU_DATA = {
@@ -41,7 +40,8 @@ STATIC_EU_DATA = {
     "ADYEN.AS": "Financials", "IMCD.AS": "Materials", "ASM.AS": "Technology", "PHI.AS": "Health Care", 
     "KBC.BR": "Financials", "UCB.BR": "Health Care", "SOLB.BR": "Materials", "ACKB.BR": "Financials", 
     "ARGX.BR": "Health Care", "UMI.BR": "Materials", "GBL.BR": "Financials", "WDP.BR": "Real Estate",
-    "ELI.BR": "Utilities", "VGP.BR": "Real Estate", "MELE.BR": "Industrials", "XIOR.BR": "Real Estate"
+    "ELI.BR": "Utilities", "VGP.BR": "Real Estate", "MELE.BR": "Industrials", "XIOR.BR": "Real Estate",
+    "TNET.BR": "Comm Services", "PROX.BR": "Comm Services", "AED.BR": "Real Estate", "COFB.BR": "Real Estate"
 }
 
 COLOR_MAP = {
@@ -53,22 +53,51 @@ COLOR_MAP = {
 
 @st.cache_data(ttl=24*3600)
 def get_market_constituents(market_code):
+    """
+    SLIMME SCRAPER UPDATE:
+    Zoekt door alle tabellen op de wiki pagina naar de juiste tabel 
+    met 'Symbol' en 'Sector' kolommen, in plaats van blind tabel [0] te pakken.
+    """
     if "USA" in market_code:
+        # Zoek juiste URL
         current_market = next(v for k, v in MARKETS.items() if v['code'] == MARKETS[k]['code'] and k.startswith("🇺🇸"))
         for k, v in MARKETS.items():
             if v['code'] == market_code: 
                 url = v['wiki_url']
                 break
+        
         try:
             headers = {"User-Agent": "Mozilla/5.0"}
-            df = pd.read_html(requests.get(url, headers=headers).text)[0]
-            sym_col = 'Symbol' if 'Symbol' in df.columns else 'Ticker Symbol'
-            sec_col = 'GICS Sector' if 'GICS Sector' in df.columns else 'Sector'
-            df_res = df[[sym_col, sec_col]].copy()
+            # Haal ALLE tabellen op
+            dfs = pd.read_html(requests.get(url, headers=headers).text)
+            
+            df_target = pd.DataFrame()
+            
+            # Loop door tabellen om de juiste te vinden
+            for df in dfs:
+                # S&P 500/400 hebben meestal 'Symbol' en 'GICS Sector'
+                if ('Symbol' in df.columns or 'Ticker Symbol' in df.columns) and \
+                   ('GICS Sector' in df.columns or 'Sector' in df.columns):
+                    df_target = df
+                    break
+            
+            if df_target.empty:
+                st.error("Kon geen aandelentabel vinden op Wikipedia.")
+                return pd.DataFrame()
+
+            # Normaliseer kolomnamen
+            sym_col = 'Symbol' if 'Symbol' in df_target.columns else 'Ticker Symbol'
+            sec_col = 'GICS Sector' if 'GICS Sector' in df_target.columns else 'Sector'
+            
+            df_res = df_target[[sym_col, sec_col]].copy()
             df_res.columns = ['Ticker', 'Sector']
+            
+            # Clean tickers (BRK.B -> BRK-B)
             df_res['Ticker'] = df_res['Ticker'].str.replace('.', '-', regex=False)
             return df_res
-        except:
+            
+        except Exception as e:
+            st.error(f"Fout bij ophalen Wikipedia: {e}")
             return pd.DataFrame()
     else:
         return pd.DataFrame(list(STATIC_EU_DATA.items()), columns=['Ticker', 'Sector'])
@@ -85,6 +114,7 @@ def clean_yfinance_data(df):
 def get_price_data(tickers):
     if not tickers: return pd.DataFrame()
     try:
+        # Batch download
         data = yf.download(tickers, period="1y", progress=False, auto_adjust=True)
         return clean_yfinance_data(data)
     except:
@@ -144,11 +174,9 @@ def calculate_rrg_metrics(df, benchmark):
         except: continue
     return pd.DataFrame(rrg_list)
 
-# TERUG VAN WEGGEWEEST: Sector RRG Berekening
 def calculate_sector_rrg_metrics(df_prices):
     if df_prices.empty or len(df_prices) < 65: return pd.DataFrame()
     try:
-        # Bereken relatieve returns t.o.v. het gemiddelde van de groep
         ret_long = (df_prices.iloc[-1] - df_prices.shift(60).iloc[-1]) / df_prices.shift(60).iloc[-1] * 100
         ret_short = (df_prices.iloc[-1] - df_prices.shift(10).iloc[-1]) / df_prices.shift(10).iloc[-1] * 100
 
@@ -169,7 +197,7 @@ def calculate_sector_rrg_metrics(df_prices):
 
         metrics['Kwadrant'] = metrics.apply(get_quadrant, axis=1)
         metrics['Ticker'] = metrics.index
-        metrics['Distance'] = np.sqrt(metrics['X_Trend']**2 + metrics['Y_Momentum']**2) * 3 # Scale factor
+        metrics['Distance'] = np.sqrt(metrics['X_Trend']**2 + metrics['Y_Momentum']**2) * 3
         return metrics.dropna()
     except:
         return pd.DataFrame()
@@ -215,7 +243,7 @@ def get_actionable_advice(ticker, key, market_info, metrics):
 # --- 3. UI LAYOUT ---
 
 # SIDEBAR
-st.sidebar.title("⚔️ Screener 3.2")
+st.sidebar.title("⚔️ Screener 3.3")
 sel_market_key = st.sidebar.selectbox("Market", list(MARKETS.keys()))
 cur_mkt = MARKETS[sel_market_key]
 api_key = st.sidebar.text_input("Gemini API Key", type="password")
@@ -230,11 +258,7 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.write("📊 **Dispersie Meter**")
 with st.sidebar.expander("❓ Wat is dit?"):
-    st.write("""
-    **Dispersie** meet hoe groot het verschil is tussen de beste en slechtste aandelen.
-    * **Laag (<5%):** Kuddegedrag. Alles stijgt/daalt samen. Moeilijk om de 'beste' te kiezen. Koop liever een ETF.
-    * **Hoog (>10%):** Stock Pickers Markt. Grote verschillen. Hier werkt deze screener het best.
-    """)
+    st.write("Dispersie meet het verschil tussen winnaars en verliezers. Hoger is beter voor stock picking.")
 
 if "USA" in sel_market_key:
     disp_tickers = list(US_SECTOR_ETFS.values())
@@ -250,7 +274,13 @@ st.title(f"Tactical Industry Screener: {cur_mkt['code']}")
 
 with st.spinner("Laden van markt data..."):
     constituents = get_market_constituents(cur_mkt['code'])
-    all_tickers = constituents['Ticker'].tolist()
+    
+    # EXTRA CHECK: Toon hoeveel aandelen we hebben gevonden
+    if constituents.empty:
+        st.error("⚠️ Fout: Geen aandelen gevonden. Check de Wikipedia verbinding.")
+        all_tickers = []
+    else:
+        all_tickers = constituents['Ticker'].tolist()
 
 # TABBLADEN
 tab0, tab1, tab2, tab3 = st.tabs(["ℹ️ Info", "🚁 Helicopter View (RRG)", "⚔️ Matrix & Signals", "🤖 AI Final Call"])
@@ -265,7 +295,7 @@ with tab0:
     **4. AI (Tab 3):** Twijfel je? Vraag de AI om een eindoordeel.
     """)
 
-# TAB 1: RRG (SECTOR LEVEL)
+# TAB 1: RRG (MARKET LEVEL)
 with tab1:
     st.subheader("Sector Rotatie")
     if "USA" in sel_market_key:
@@ -290,43 +320,55 @@ with tab2:
     st.subheader("🎯 Sector Analyse")
     
     # 1. Selectie
-    sectors = sorted(constituents['Sector'].unique().tolist())
-    sel_sector = st.selectbox("Selecteer Sector:", sectors)
-    
-    # 2. Knop & Session State Logica (TEGEN VERSPRINGEN)
-    if st.button("Start Analyse"):
-        sector_tickers = constituents[constituents['Sector'] == sel_sector]['Ticker'].tolist()
+    if not constituents.empty:
+        sectors = sorted(constituents['Sector'].unique().tolist())
+        sel_sector = st.selectbox("Selecteer Sector:", sectors)
         
-        with st.spinner(f"Analyseren van {sel_sector}..."):
-            sec_prices = get_price_data(sector_tickers)
-            
-            if not sec_prices.empty and len(sector_tickers) > 1:
-                # A. Bereken Scatter Data (Terug van weggeweest!)
-                scatter_df = calculate_sector_rrg_metrics(sec_prices)
-                
-                # B. Bereken Matrix Data
-                matrix_df = calculate_rs_matrix_score(sec_prices)
-                last_prices = sec_prices.iloc[-1].to_frame(name="Prijs")
-                final_matrix = matrix_df.merge(last_prices, left_on="Ticker", right_index=True)
-                
-                # Signalen toevoegen
-                final_matrix['Rank'] = range(1, len(final_matrix) + 1)
-                final_matrix['Actie'] = final_matrix['Rank'].apply(lambda r: "🟢 BUY" if r <= 3 else ("🟡 HOLD" if r <= 5 else "🔴 SELL"))
-                
-                # OPSLAAN IN SESSION STATE
-                st.session_state['data_scatter'] = scatter_df
-                st.session_state['data_matrix'] = final_matrix
-                st.session_state['data_sector'] = sel_sector # Check of sector zelfde is
-            else:
-                st.error("Te weinig data beschikbaar.")
+        # 2. Knop & Session State
+        if st.button("Start Analyse"):
+            # RESET data bij nieuwe klik om "Something else" te voorkomen
+            if 'data_matrix' in st.session_state: del st.session_state['data_matrix']
+            if 'data_scatter' in st.session_state: del st.session_state['data_scatter']
 
-    # 3. Weergave vanuit Session State (Blijft staan na reload)
+            sector_tickers = constituents[constituents['Sector'] == sel_sector]['Ticker'].tolist()
+            
+            st.info(f"⏳ Data ophalen voor {len(sector_tickers)} aandelen in {sel_sector}...")
+            
+            with st.spinner(f"Bezig met berekenen..."):
+                sec_prices = get_price_data(sector_tickers)
+                
+                if not sec_prices.empty and len(sector_tickers) > 1:
+                    # A. Scatter Data
+                    scatter_df = calculate_sector_rrg_metrics(sec_prices)
+                    
+                    # B. Matrix Data
+                    matrix_df = calculate_rs_matrix_score(sec_prices)
+                    last_prices = sec_prices.iloc[-1].to_frame(name="Prijs")
+                    final_matrix = matrix_df.merge(last_prices, left_on="Ticker", right_index=True)
+                    
+                    # Signalen
+                    final_matrix['Rank'] = range(1, len(final_matrix) + 1)
+                    final_matrix['Actie'] = final_matrix['Rank'].apply(lambda r: "🟢 BUY" if r <= 3 else ("🟡 HOLD" if r <= 5 else "🔴 SELL"))
+                    
+                    # OPSLAAN
+                    st.session_state['data_scatter'] = scatter_df
+                    st.session_state['data_matrix'] = final_matrix
+                    st.session_state['data_sector'] = sel_sector
+                else:
+                    st.error("Te weinig data beschikbaar voor deze sector.")
+    else:
+        st.warning("Geen sectoren geladen.")
+
+    # 3. Weergave (Persistent)
     if 'data_matrix' in st.session_state and st.session_state.get('data_sector') == sel_sector:
         
-        # A. SCATTERPLOT (De teruggekeerde feature)
-        st.markdown("---")
+        # Weergave Check
+        aantal = len(st.session_state['data_matrix'])
+        st.success(f"✅ Analyse voltooid: {aantal} aandelen geanalyseerd.")
+
+        # A. SCATTER
         st.markdown(f"#### 1. Visueel: {sel_sector} Scatter")
-        scat_data = st.session_state['data_scatter']
+        scat_data = st.session_state.get('data_scatter', pd.DataFrame())
         if not scat_data.empty:
             fig_sec = px.scatter(
                 scat_data, x="X_Trend", y="Y_Momentum",
@@ -339,12 +381,10 @@ with tab2:
             fig_sec.add_vline(x=0, line_color="black")
             st.plotly_chart(fig_sec, use_container_width=True)
             
-        # B. MATRIX TABEL
-        st.markdown("---")
+        # B. MATRIX
         st.markdown(f"#### 2. Lijst: {sel_sector} Matrix Score")
         mat_data = st.session_state['data_matrix']
         
-        # Save top pick for AI tab
         st.session_state['top_stock'] = mat_data.iloc[0]['Ticker']
         st.session_state['top_score'] = mat_data.iloc[0]['Matrix_Power']
         st.session_state['top_rank'] = 1
@@ -362,7 +402,6 @@ with tab3:
     st.subheader("👨‍💼 De Portfolio Manager")
     col_in, col_res = st.columns([1, 2])
     with col_in:
-        # Haal standaard waarde op uit sessie
         def_ticker = st.session_state.get('top_stock', '')
         t_input = st.text_input("Ticker:", value=def_ticker)
         
