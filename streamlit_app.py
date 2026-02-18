@@ -87,18 +87,25 @@ def get_market_constituents(market_code):
         filtered = {k: v for k, v in STATIC_EU_DATA.items() if k.endswith(suffix)}
         return pd.DataFrame(list(filtered.items()), columns=['Ticker', 'Sector'])
 
+def clean_yfinance_data(df):
+    """Hulpmiddel om MultiIndex ellende van yfinance op te lossen."""
+    if isinstance(df.columns, pd.MultiIndex):
+        # Als er een 'Close' level is, pak die
+        if 'Close' in df.columns.get_level_values(0):
+            df = df['Close']
+        # Soms staat de ticker in level 0 en 'Close' in level 1
+        elif 'Close' in df.columns.get_level_values(1):
+            df = df.xs('Close', level=1, axis=1)
+            
+    # Nogmaals checken of we nu kolommen hebben die 'Ticker' heten of dat het index is
+    return df
+
 @st.cache_data(ttl=3600)
 def get_price_data(tickers):
     if not tickers: return pd.DataFrame()
     try:
         data = yf.download(tickers, period="2y", progress=False, auto_adjust=True)
-        # Fix voor nieuwe yfinance die soms MultiIndex teruggeeft bij 1 ticker
-        if isinstance(data.columns, pd.MultiIndex):
-            if 'Close' in data.columns.get_level_values(0):
-                 return data['Close']
-        if 'Close' in data.columns:
-             return data['Close']
-        return data
+        return clean_yfinance_data(data)
     except:
         return pd.DataFrame()
 
@@ -106,18 +113,28 @@ def calculate_market_regime_data(ticker):
     """Haalt data op voor de grafiek in de sidebar."""
     try:
         data = yf.download(ticker, period="2y", progress=False, auto_adjust=True)
-        if 'Close' in data.columns:
+        
+        # Plat slaan naar simpele dataframe met 1 kolom
+        if isinstance(data.columns, pd.MultiIndex):
+            if 'Close' in data.columns.get_level_values(0):
+                df = data['Close'].copy()
+            else:
+                df = data.iloc[:, 0].to_frame() # Pak gewoon de eerste kolom
+        elif 'Close' in data.columns:
             df = data[['Close']].copy()
         else:
-            df = data.copy() # Fallback
-            
-        # Rename column for clarity if needed
-        if isinstance(df, pd.Series): df = df.to_frame(name='Close')
-        if df.shape[1] > 1 and 'Close' not in df.columns: df = df.iloc[:, 0].to_frame(name='Close') # Pak eerste kolom
+            df = data.iloc[:, 0].to_frame(name='Close')
+
+        # Zorg dat het een DataFrame is en geen Series
+        if isinstance(df, pd.Series):
+            df = df.to_frame(name='Close')
+        else:
+            df.columns = ['Close'] # Forceer naam
             
         df['SMA200'] = df['Close'].rolling(200).mean()
         return df
     except Exception as e:
+        st.sidebar.error(f"Fout in regime data: {e}")
         return pd.DataFrame()
 
 def calculate_rrg_metrics(df, benchmark):
@@ -166,6 +183,9 @@ def calculate_sector_rrg_metrics(df_prices):
     if df_prices.empty: return pd.DataFrame()
 
     try:
+        # Check of we genoeg data hebben (minimaal 60 dagen)
+        if len(df_prices) < 65: return pd.DataFrame()
+
         ret_long = (df_prices.iloc[-1] - df_prices.shift(60).iloc[-1]) / df_prices.shift(60).iloc[-1] * 100
         ret_short = (df_prices.iloc[-1] - df_prices.shift(10).iloc[-1]) / df_prices.shift(10).iloc[-1] * 100
 
@@ -191,15 +211,16 @@ def calculate_sector_rrg_metrics(df_prices):
         metrics['Kwadrant'] = metrics.apply(get_quadrant, axis=1)
         metrics['Ticker'] = metrics.index
         metrics['Distance'] = np.sqrt(metrics['X_Trend']**2 + metrics['Y_Momentum']**2)
+        
+        # Scaling factor voor visualisatie (zodat bollen niet te klein zijn)
+        metrics['Distance'] = metrics['Distance'].apply(lambda x: max(x, 2) * 2) 
 
         return metrics.dropna()
-    except:
+    except Exception as e:
+        st.error(f"Fout in sector RRG: {e}")
         return pd.DataFrame()
 
 def calculate_ranking(df):
-    """
-    Berekent ranking en zorgt voor een schoon DataFrame om merge errors te voorkomen.
-    """
     if df.empty or len(df) < 130: return pd.DataFrame()
     
     try:
@@ -219,13 +240,11 @@ def calculate_ranking(df):
             'Score': score * 100
         })
         
-        # BELANGRIJK: Zorg dat Ticker een kolom is en geen index
         ranking_data.index.name = 'Ticker'
         ranking_data = ranking_data.reset_index()
         
         return ranking_data.sort_values('Score', ascending=False).dropna()
     except Exception as e:
-        st.error(f"Fout in ranking berekening: {e}")
         return pd.DataFrame()
 
 def get_gemini_advice(ticker, key, market_status, sector):
@@ -270,16 +289,24 @@ st.sidebar.subheader("🚦 Markt Regime")
 # Markt data ophalen en plotten
 regime_df = calculate_market_regime_data(benchmark_ticker)
 if not regime_df.empty:
-    curr_price = regime_df['Close'].iloc[-1]
-    sma_200 = regime_df['SMA200'].iloc[-1]
+    # CRUCIAL FIX: Gebruik .item() om scalars te krijgen
+    try:
+        curr_price = regime_df['Close'].iloc[-1].item()
+        sma_200 = regime_df['SMA200'].iloc[-1].item()
+    except:
+        # Fallback voor als .item() faalt (bv bij oudere pandas/numpy versies)
+        curr_price = float(regime_df['Close'].iloc[-1])
+        sma_200 = float(regime_df['SMA200'].iloc[-1])
     
     if curr_price > sma_200:
-        st.sidebar.success(f"✅ BULL MARKET\n\nKoers ligt {((curr_price/sma_200)-1)*100:.1f}% boven 200 SMA.")
+        pct_diff = ((curr_price/sma_200)-1)*100
+        st.sidebar.success(f"✅ BULL MARKET\n\nKoers {pct_diff:.1f}% > 200 SMA.")
     else:
-        st.sidebar.error(f"⛔ BEAR MARKET\n\nKoers ligt {((1-(curr_price/sma_200)))*100:.1f}% onder 200 SMA.")
+        pct_diff = ((1-(curr_price/sma_200)))*100
+        st.sidebar.error(f"⛔ BEAR MARKET\n\nKoers {pct_diff:.1f}% < 200 SMA.")
         
     # Mini chart in sidebar
-    st.sidebar.line_chart(regime_df.tail(252), color=["#00FF00" if curr_price > sma_200 else "#FF0000", "#FFFFFF"], height=150)
+    st.sidebar.line_chart(regime_df['Close'].tail(252), height=150)
 else:
     st.sidebar.warning("Geen benchmark data beschikbaar.")
 
@@ -326,11 +353,17 @@ with tab1:
                 rrg_metrics, x="RS-Ratio", y="RS-Momentum",
                 color="Kwadrant", text="Naam", size="Distance",
                 color_discrete_map=COLOR_MAP,
-                title=f"RRG: {market_code}", height=650,
+                title=f"RRG: {market_code}", height=700,
                 hover_data=["Kwadrant"]
             )
-            # Layout verbetering voor leesbaarheid
-            fig.update_traces(textposition='top center', textfont=dict(size=12, color='black', family="Arial Black"))
+            
+            # --- VERBETERDE LEESBAARHEID ---
+            fig.update_traces(
+                textposition='top center', 
+                textfont=dict(size=11, family="Arial Black"),
+                marker=dict(opacity=0.75, line=dict(width=1, color='DarkSlateGrey'))
+            )
+            
             fig.update_layout(shapes=[
                 dict(type="line", x0=100, y0=0, x1=100, y1=200, line=dict(color="gray", dash="dash")),
                 dict(type="line", x0=0, y0=100, x1=200, y1=100, line=dict(color="gray", dash="dash"))
@@ -375,21 +408,23 @@ with tab2:
                             color_discrete_map=COLOR_MAP,
                             title=f"Relative Rotation: {selected_sector}",
                             labels={"X_Trend": "Trend (vs Sector)", "Y_Momentum": "Momentum (vs Sector)"},
-                            height=650
+                            height=700
                         )
                         
-                        # VERBETERINGEN LEESBAARHEID
+                        # --- VERBETERDE LEESBAARHEID (SECTOR) ---
                         fig_sec.update_traces(
                             textposition='top center', 
-                            marker=dict(opacity=0.7, line=dict(width=1, color='DarkSlateGrey')), # Randje om bol
-                            textfont=dict(size=12, color='white') # Witte tekst in dark mode, of zwart in light
+                            textfont=dict(size=12, family="Arial Black"),
+                            marker=dict(opacity=0.7, line=dict(width=1, color='DarkSlateGrey'))
                         )
                         
                         # Assen kruis
-                        fig_sec.add_hline(y=0, line_color="white", line_width=1)
-                        fig_sec.add_vline(x=0, line_color="white", line_width=1)
+                        fig_sec.add_hline(y=0, line_color="black", line_width=1)
+                        fig_sec.add_vline(x=0, line_color="black", line_width=1)
                         
                         st.plotly_chart(fig_sec, use_container_width=True)
+                    else:
+                        st.warning("Niet genoeg historische data voor deze sector.")
 
                 # --- STANDAARD TABEL ---
                 st.markdown("---")
@@ -399,8 +434,7 @@ with tab2:
                 if not rank_df.empty:
                     st.session_state['top_pick'] = rank_df.iloc[0]['Ticker']
                     
-                    # VEILIGE MERGE (Bugfix applied)
-                    # We forceren dat 'Ticker' een kolom is in beide
+                    # Merge FIX
                     display = pd.merge(rank_df, constituents_df, on='Ticker', how='left')
                     
                     st.dataframe(
