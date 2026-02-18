@@ -318,148 +318,154 @@ with tab3:
         current_sec = st.session_state.get('sector_sel', 'Alle Sectoren')
         st.subheader(f"Deep Dive: {current_sec}")
         
-        # 1. Benchmark & Tickers ophalen
+        # 1. Setup Data
         if "USA" in st.session_state['market_key'] and current_sec != "Alle Sectoren":
             bench_ticker = US_SECTOR_MAP.get(current_sec, market_cfg['benchmark'])
         else:
             bench_ticker = market_cfg['benchmark']
         
-        # Check of data al bestaat (caching logic)
         constituents = get_market_constituents(st.session_state['market_key'])
-        if constituents.empty:
-            st.error("Geen data.")
-            st.stop()
-            
-        if current_sec != "Alle Sectoren":
-            subset = constituents[constituents['Sector'] == current_sec]['Ticker'].tolist()
-        else:
-            subset = constituents['Ticker'].head(60).tolist()
         
-        dl_list = list(set(subset + [bench_ticker]))
-
-        # Data ophalen (met simpele cache check in state)
-        if 'df_stocks_raw' not in st.session_state or len(st.session_state['df_stocks_raw'].columns) < len(dl_list):
-                st.info(f"Koersdata ophalen voor {len(dl_list)} aandelen...")
-                df_stocks = get_price_data(dl_list)
-                st.session_state['df_stocks_raw'] = df_stocks
-        else:
-                df_stocks = st.session_state['df_stocks_raw']
-
-        st.session_state['bench_ticker_t3'] = bench_ticker
-        
-        # Berekenen
-        rrg_stocks = calculate_rrg_extended(df_stocks, bench_ticker)
-        
-        if not rrg_stocks.empty:
-            # Cleaning
-            rrg_stocks = rrg_stocks.dropna(subset=['RS-Ratio', 'RS-Momentum', 'Distance', 'Kwadrant'])
-            rrg_stocks = rrg_stocks[rrg_stocks['Distance'] > 0]
-            st.session_state['rrg_stocks_data'] = rrg_stocks 
+        if not constituents.empty:
+            if current_sec != "Alle Sectoren":
+                subset = constituents[constituents['Sector'] == current_sec]['Ticker'].tolist()
+            else:
+                subset = constituents['Ticker'].head(60).tolist()
             
-            # --- SPLITS DATA: POWER VS REST ---
-            # Dit is de sleutel tot visualisatie. We trekken de winnaars los van de rest.
-            mask_power = (rrg_stocks['Power_Heading'] == "✅ YES")
-            df_power = rrg_stocks[mask_power]
-            df_rest = rrg_stocks[~mask_power]
-
-            col1, col2 = st.columns([3, 1])
+            dl_list = list(set(subset + [bench_ticker]))
             
-            with col1:
-                st.markdown("### 🎯 Alpha Focus RRG")
+            # Data ophalen
+            if 'df_stocks_raw' not in st.session_state or len(st.session_state['df_stocks_raw'].columns) < len(dl_list):
+                 st.info(f"Koersdata ophalen voor {len(dl_list)} aandelen...")
+                 df_stocks = get_price_data(dl_list)
+                 st.session_state['df_stocks_raw'] = df_stocks
+            else:
+                 df_stocks = st.session_state['df_stocks_raw']
+            st.session_state['bench_ticker_t3'] = bench_ticker
+            
+            # Bereken RRG
+            rrg_stocks = calculate_rrg_extended(df_stocks, bench_ticker)
+            
+            if not rrg_stocks.empty:
+                # Cleaning
+                rrg_stocks = rrg_stocks.dropna(subset=['RS-Ratio', 'RS-Momentum', 'Distance', 'Kwadrant'])
+                rrg_stocks = rrg_stocks[rrg_stocks['Distance'] > 0]
+                st.session_state['rrg_stocks_data'] = rrg_stocks 
                 
-                # We bouwen de grafiek laag voor laag op met Graph Objects (go)
-                fig = go.Figure()
-
-                # LAAG 1: De 'Rest' (Grijs/Zilver, subtiel naar de achtergrond)
-                fig.add_trace(go.Scatter(
-                    x=df_rest['RS-Ratio'],
-                    y=df_rest['RS-Momentum'],
-                    mode='markers',
-                    name='Overige (Wait/Sell)',
-                    text=df_rest['Ticker'],
-                    marker=dict(
-                        color='silver',     # Neutrale kleur
-                        size=8,             # Iets kleiner
-                        opacity=0.5,        # Transparanter
-                        line=dict(width=0)
-                    ),
-                    hovertemplate="<b>%{text}</b><br>R: %{x:.1f} | M: %{y:.1f}<extra></extra>"
-                ))
-
-                # LAAG 2: De 'Power Zone' (Gekleurd, Groot, Focus)
-                # We kleuren ze op basis van Heading, maar alleen binnen de 'goede' zone.
-                fig.add_trace(go.Scatter(
-                    x=df_power['RS-Ratio'],
-                    y=df_power['RS-Momentum'],
-                    mode='markers+text', # Voeg tekst labels toe aan de punten zelf voor duidelijkheid
-                    name='🎯 Power Zone (0-90°)',
-                    text=df_power['Ticker'],
-                    textposition="top center",
-                    textfont=dict(size=9, color='black'),
-                    marker=dict(
-                        color=df_power['Heading'], 
-                        colorscale='Viridis_r', # Mooie professionele verloop (Geel/Groen/Blauw)
-                        size=14,                # Groter -> Pop effect
-                        opacity=1,
-                        showscale=True,         # Toon colorbar alleen voor deze nuttige groep
-                        colorbar=dict(title="Hoek (Heading)", len=0.5, yanchor="top", y=1, x=1),
-                        line=dict(width=2, color='DarkSlateGrey') # Duidelijke rand om de cirkel
-                    ),
-                    hovertemplate="<b>%{text}</b><br>Heading: %{marker.color:.1f}°<br>Distance: %{marker.size:.2f}<extra></extra>"
-                ))
-
-                # LAAG 3: Visuele grens (De 0-90 Cone)
-                # We tekenen 2 lijnen vanuit het centrum om de zone fysiek af te bakenen
-                max_val = 110 # Even hardcoded voor de lijnlengte visualisatie
+                col1, col2 = st.columns([3, 1])
                 
-                # Assen (Het kruis)
-                fig.add_hline(y=100, line_color="black", line_width=1)
-                fig.add_vline(x=100, line_color="black", line_width=1)
+                with col1:
+                    st.markdown("### 🧭 Relative Rotation Graph")
+                    
+                    # --- CUSTOM COLOR SCALE ---
+                    # Logica: 0-90 is Groen (Top = 45). 90 is Geel. 100+ is Rood.
+                    # Plotly scales werken van 0.0 tot 1.0 (over 360 graden)
+                    # 90 graden = 0.25 op de schaal (90/360)
+                    
+                    custom_color_scale = [
+                        (0.00, "#76c893"),  # 0°   : Start Groen
+                        (0.125, "#1a936f"), # 45°  : ABSOLUUT GROEN (Het ideaal)
+                        (0.20, "#d9ed92"),  # 72°  : Lichtgroen/Geel
+                        (0.25, "#ffea00"),  # 90°  : GEEL (De grens/Waarschuwing)
+                        (0.30, "#ff7b00"),  # 108° : ORANJE (Snel fout)
+                        (0.50, "#d00000"),  # 180° : DIEP ROOD (Lagging)
+                        (0.75, "#6a040f"),  # 270° : DONKER ROOD
+                        (0.90, "#ffba08"),  # 324° : Terugkomend (Improving - Oranje/Geel)
+                        (1.00, "#76c893")   # 360° : Terug naar Start Groen
+                    ]
 
-                # STYLING
-                fig.update_layout(
-                    template="plotly_white",
-                    height=700,
-                    title=f"<b>{current_sec}</b> Sector Rotatie<br><sup>Focus op 0-90° (Rechtsboven & Versnellend)</sup>",
-                    legend=dict(
-                        yanchor="top", y=0.99, xanchor="left", x=0.01, # Legende netjes linksboven in de grafiek
-                        bgcolor="rgba(255, 255, 255, 0.8)",
-                        bordercolor="Black", borderwidth=1
-                    ),
-                    xaxis=dict(title="RS-Ratio (Trend)", showgrid=True, gridcolor='#f0f0f0'),
-                    yaxis=dict(title="RS-Momentum (Snelheid)", showgrid=True, gridcolor='#f0f0f0')
-                )
+                    fig2 = px.scatter(
+                        rrg_stocks, 
+                        x="RS-Ratio", 
+                        y="RS-Momentum", 
+                        color="Heading", 
+                        text="Ticker", 
+                        size="Distance",
+                        height=700,
+                        hover_data=["Kwadrant", "Power_Heading"],
+                        title=f"<b>RRG SIGNAL: {current_sec}</b> <br><sup>Groen = Buy Zone (0-90°) | Geel = Warning | Rood = Avoid</sup>"
+                    )
+                    
+                    # TOEPASSEN CUSTOM KLEUREN
+                    fig2.update_traces(
+                        marker=dict(
+                            line=dict(width=1, color='black'), # Zwart randje voor contrast
+                            opacity=0.9
+                        ),
+                        textposition='top center',
+                        textfont=dict(size=10, color='darkslategrey')
+                    )
+                    
+                    # Forceer de schaal exact van 0 tot 360, anders kloppen de kleuren niet
+                    fig2.update_layout(
+                        coloraxis_cmin=0,
+                        coloraxis_cmax=360,
+                        coloraxis_colorscale=custom_color_scale,
+                        coloraxis_colorbar=dict(
+                            title="Richting",
+                            tickvals=[0, 45, 90, 180, 270],
+                            ticktext=["0°", "45° (MAX)", "90° (⚠️)", "180°", "270°"]
+                        )
+                    )
 
-                # Zorg dat 100,100 gecentreerd blijft
-                max_dev = max(abs(rrg_stocks['RS-Ratio']-100).max(), abs(rrg_stocks['RS-Momentum']-100).max()) * 1.1
-                fig.update_xaxes(range=[100-max_dev, 100+max_dev])
-                fig.update_yaxes(range=[100-max_dev, 100+max_dev])
-                
-                # Watermerken (Subtieler)
-                fig.add_annotation(x=102, y=102, text="LEADING", showarrow=False, font=dict(size=12, color="green"))
-                fig.add_annotation(x=98, y=98, text="LAGGING", showarrow=False, font=dict(size=12, color="red"))
+                    # --- PRO DESIGN (Minimalistisch) ---
+                    fig2.update_layout(
+                        template="plotly_white",
+                        xaxis=dict(showgrid=True, gridcolor='#f2f2f2', zeroline=False), 
+                        yaxis=dict(showgrid=True, gridcolor='#f2f2f2', zeroline=False),
+                        plot_bgcolor='white',
+                        paper_bgcolor='white',
+                        margin=dict(t=60, b=40, l=40, r=40)
+                    )
 
-                st.plotly_chart(fig, use_container_width=True)
+                    # Assen en Watermerken
+                    fig2.add_hline(y=100, line_color="black", line_width=1)
+                    fig2.add_vline(x=100, line_color="black", line_width=1)
+                    
+                    # Subtiele Watermerken
+                    fig2.add_annotation(x=0.95, y=0.95, xref="paper", yref="paper", text="LEADING", showarrow=False, font=dict(size=20, color="rgba(0,128,0,0.1)"))
+                    fig2.add_annotation(x=0.05, y=0.05, xref="paper", yref="paper", text="LAGGING", showarrow=False, font=dict(size=20, color="rgba(255,0,0,0.1)"))
 
-            with col2:
-                st.markdown("### 🏆 Top Picks")
-                # Tabel alleen met de 'Power' aandelen
-                if not df_power.empty:
-                    # Sorteer op Distance (Kracht)
-                    top_picks = df_power.sort_values('Distance', ascending=False).head(15)
+                    # Centreren
+                    max_dev = max(abs(rrg_stocks['RS-Ratio']-100).max(), abs(rrg_stocks['RS-Momentum']-100).max()) * 1.1
+                    fig2.update_xaxes(range=[100-max_dev, 100+max_dev])
+                    fig2.update_yaxes(range=[100-max_dev, 100+max_dev])
+
+                    st.plotly_chart(fig2, use_container_width=True)
+
+                with col2:
+                    st.markdown("### 🚦 Signal List")
+                    
+                    # We maken een visuele lijst die matcht met de grafiek
+                    # Sorteren: Eerst de 'Groene' (Power Heading), dan gesorteerd op Distance
+                    
+                    # Functie om achtergrondkleur te bepalen voor de tabel
+                    def color_heading(val):
+                        # Simpele versie van de kleurenmap voor de tabel
+                        if 0 <= val <= 90:
+                            return 'background-color: #d1e7dd; color: #0f5132;' # Groenig
+                        elif 270 <= val <= 360:
+                             return 'background-color: #fff3cd; color: #664d03;' # Geelig (Improving)
+                        else:
+                            return 'background-color: #f8d7da; color: #842029;' # Rodig
+                    
+                    # Tabel data
+                    df_view = rrg_stocks[['Ticker', 'Heading', 'Distance']].copy()
+                    df_view = df_view.sort_values('Distance', ascending=False) # Sterkste bovenaan
                     
                     st.dataframe(
-                        top_picks[['Ticker', 'Distance']].style
-                        .background_gradient(subset=['Distance'], cmap='Greens')
-                        .format({"Distance": "{:.2f}"}),
+                        df_view.style
+                        .map(color_heading, subset=['Heading'])
+                        .format({"Heading": "{:.0f}°", "Distance": "{:.2f}"}),
                         hide_index=True,
-                        use_container_width=True
+                        use_container_width=True,
+                        height=600
                     )
-                else:
-                    st.warning("Geen aandelen in de Power Zone (0-90°).")
-                    st.markdown("De markt is waarschijnlijk zwak of defensief.")
+
+            else:
+                st.warning("⚠️ Onvoldoende data voor plot.")
         else:
-            st.warning("Onvoldoende data.")
+            st.error("Kon geen aandelenlijst ophalen.")
 # === TAB 4: AI ANALYST ===
 with tab4:
     st.header("🧠 AI-Agent Prompt Generator")
