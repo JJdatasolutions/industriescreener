@@ -97,7 +97,8 @@ def get_price_data(tickers):
 
 def calculate_rrg_extended(df, benchmark_ticker):
     """
-    RRG + Heading (Hoek) berekening
+    RRG + Heading (Hoek) berekening - GECORRIGEERD
+    Heading is nu gebaseerd op BEWEGING (Velocity), niet op positie.
     """
     if df.empty or benchmark_ticker not in df.columns: return pd.DataFrame()
     
@@ -112,27 +113,37 @@ def calculate_rrg_extended(df, benchmark_ticker):
             rs_ratio = 100 * (rs / rs_ma)
             rs_mom = 100 * (rs_ratio / rs_ratio.shift(10))
             
-            if len(rs_ratio) < 1: continue
+            # We hebben minstens 2 punten nodig om een richting te bepalen
+            if len(rs_ratio) < 2: continue
             
             curr_r = rs_ratio.iloc[-1]
             curr_m = rs_mom.iloc[-1]
+            prev_r = rs_ratio.iloc[-2]  # De waarde van gisteren/vorige periode
+            prev_m = rs_mom.iloc[-2]
             
             # --- KWANTITATIEVE UPDATE: Heading & Distance ---
-            # 1. Distance (Euclidisch)
+            
+            # 1. Distance (Euclidisch vanaf centrum 100,100) - Dit blijft positie!
             dist = np.sqrt((curr_r - 100)**2 + (curr_m - 100)**2)
             
-            # 2. Heading (Hoek in graden)
-            # dx = Ratio - 100, dy = Momentum - 100
-            # atan2 geeft radialen, omzetten naar graden
-            dx = curr_r - 100
-            dy = curr_m - 100
-            heading_rad = math.atan2(dy, dx)
-            heading_deg = math.degrees(heading_rad)
-            if heading_deg < 0: heading_deg += 360
+            # 2. Heading (Hoek van de BEWEGING)
+            # We kijken naar de vector: waar kwamen we vandaan -> waar zijn we nu?
+            dx = curr_r - prev_r
+            dy = curr_m - prev_m
             
-            # Bepaal 'Power Heading' (0-90 graden is North-East)
+            # Als er geen beweging is, is de hoek 0 (of ongedefinieerd, hier vangen we dat op)
+            if dx == 0 and dy == 0:
+                heading_deg = 0
+            else:
+                heading_rad = math.atan2(dy, dx)
+                heading_deg = math.degrees(heading_rad)
+                if heading_deg < 0: heading_deg += 360
+            
+            # Bepaal 'Power Heading' (0-90 graden is North-East = Winstgevende richting)
+            # Dit kan nu dus OOK gebeuren als een aandeel linksboven of linksonder staat!
             is_power_heading = 0 <= heading_deg <= 90
             
+            # Kwadrant bepaling (blijft gebaseerd op positie)
             if curr_r > 100 and curr_m > 100: status = "1. LEADING"
             elif curr_r < 100 and curr_m > 100: status = "4. IMPROVING"
             elif curr_r < 100 and curr_m < 100: status = "3. LAGGING"
@@ -150,7 +161,6 @@ def calculate_rrg_extended(df, benchmark_ticker):
         except: continue
         
     return pd.DataFrame(rrg_data)
-
 def calculate_market_health(bench_series):
     curr = bench_series.iloc[-1]
     sma200 = bench_series.rolling(200).mean().iloc[-1]
