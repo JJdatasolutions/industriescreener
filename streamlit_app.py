@@ -279,37 +279,126 @@ with tab1:
 with tab2:
     if st.session_state.get('active'):
         st.subheader("Sector Rotatie")
+        
+        # 1. Data Ophalen
         with st.spinner("Sectoren analyseren..."):
             tickers = list(US_SECTOR_MAP.values()) if "USA" in st.session_state['market_key'] else []
-            if not tickers: # Fallback voor EU
+            
+            # Fallback voor EU of als map leeg is
+            if not tickers: 
                  constituents = get_market_constituents(st.session_state['market_key'])
                  tickers = constituents['Ticker'].head(15).tolist() if not constituents.empty else []
 
             if tickers:
-                tickers.append(market_cfg['benchmark'])
-                df_sec = get_price_data(tickers)
+                # Benchmark toevoegen voor berekening
+                calc_tickers = list(set(tickers + [market_cfg['benchmark']]))
+                df_sec = get_price_data(calc_tickers)
                 rrg_sec = calculate_rrg_extended(df_sec, market_cfg['benchmark'])
                 
                 if not rrg_sec.empty:
-                    # Voeg labels toe
+                    # 2. Labels en Cleaning
+                    # We maken een mooie naam (bijv 'Technology') ipv de ticker (XLK)
                     labels = {v: k for k, v in US_SECTOR_MAP.items()}
+                    # Map de ticker naar de naam, als die niet bestaat, gebruik de ticker
                     rrg_sec['Label'] = rrg_sec['Ticker'].map(labels).fillna(rrg_sec['Ticker'])
                     
-                    fig = px.scatter(rrg_sec, x="RS-Ratio", y="RS-Momentum", 
-                                     color="Kwadrant", text="Label", size="Distance",
-                                     color_discrete_map=COLOR_MAP, height=650,
-                                     hover_data=["Heading", "Power_Heading"])
-                    
-                    fig.add_hline(y=100, line_dash="dash", line_color="grey")
-                    fig.add_vline(x=100, line_dash="dash", line_color="grey") 
-                    # Teken de 'Northeast' Alpha zone
-                    fig.add_shape(type="rect", x0=100, y0=100, x1=105, y1=105, 
-                                  line=dict(color="RoyalBlue", width=0), fillcolor="rgba(0,0,255,0.1)")
-                    
-                    fig.update_traces(textposition='top center')
-                    st.plotly_chart(fig, use_container_width=True)
-                else: st.warning("Geen sector data.")
+                    # Filter: Alleen de opgevraagde tickers (excl benchmark zelf soms)
+                    rrg_sec = rrg_sec[rrg_sec['Ticker'].isin(tickers)]
+                    rrg_sec = rrg_sec[rrg_sec['Distance'] > 0]
 
+                    # 3. Visualisatie (Exacte kopie van Tab 3 stijl)
+                    
+                    # --- CUSTOM COLOR SCALE ---
+                    # 0-90 = Groen (met 45 als piek). >90 = Rood.
+                    custom_color_scale = [
+                        # GROENE ZONE (0 - 90)
+                        (0.00, "#a7f3d0"),  # 0°   : Lichtgroen
+                        (0.125, "#065f46"), # 45°  : DONKERGROEN (Sweet Spot)
+                        (0.25, "#a7f3d0"),  # 90°  : Lichtgroen
+                        
+                        # RODE ZONE (91 - 360)
+                        (0.2501, "#fca5a5"), # 90.1°: Lichtrood
+                        (0.50, "#dc2626"),   # 180° : Rood
+                        (0.75, "#991b1b"),   # 270° : Donker Rood
+                        (1.00, "#450a0a")    # 360° : Zwart/Rood
+                    ]
+
+                    fig = px.scatter(
+                        rrg_sec, 
+                        x="RS-Ratio", 
+                        y="RS-Momentum", 
+                        color="Heading", 
+                        text="Label",  # Gebruik de leesbare Sector naam
+                        size="Distance",
+                        height=650,
+                        hover_data=["Kwadrant", "Power_Heading"],
+                        title=f"<b>SECTOR ROTATIE</b> <br><sup>Focus op 45° (Donkergroen) | Vermijd Rood</sup>"
+                    )
+                    
+                    # STYLING
+                    fig.update_traces(
+                        marker=dict(
+                            line=dict(width=1, color='black'), 
+                            opacity=0.9
+                        ),
+                        textposition='top center',
+                        textfont=dict(size=11, color='darkslategrey', family="Arial Black") # Iets dikkere tekst voor sectoren
+                    )
+                    
+                    # LAYOUT & KLEURENKAART
+                    fig.update_layout(
+                        coloraxis_cmin=0,
+                        coloraxis_cmax=360,
+                        coloraxis_colorscale=custom_color_scale,
+                        coloraxis_colorbar=dict(
+                            title="Richting",
+                            tickvals=[0, 45, 90, 180, 270],
+                            ticktext=["0°", "45° TOP", "90° Grens", "180°", "270°"]
+                        ),
+                        template="plotly_white",
+                        xaxis=dict(showgrid=True, gridcolor='#f2f2f2', zeroline=False), 
+                        yaxis=dict(showgrid=True, gridcolor='#f2f2f2', zeroline=False),
+                        plot_bgcolor='white',
+                        paper_bgcolor='white',
+                        margin=dict(t=60, b=40, l=40, r=40)
+                    )
+                    
+                    # Watermerken & Assen
+                    fig.add_hline(y=100, line_color="black", line_width=1)
+                    fig.add_vline(x=100, line_color="black", line_width=1)
+                    
+                    # Visuele tekst annotaties
+                    fig.add_annotation(x=101, y=101, text="BUY ZONE", showarrow=False, font=dict(size=14, color="#065f46"))
+                    fig.add_annotation(x=99, y=99, text="AVOID", showarrow=False, font=dict(size=14, color="#991b1b"))
+
+                    # Centreren van de grafiek
+                    max_dev = max(abs(rrg_sec['RS-Ratio']-100).max(), abs(rrg_sec['RS-Momentum']-100).max()) * 1.1
+                    fig.update_xaxes(range=[100-max_dev, 100+max_dev])
+                    fig.update_yaxes(range=[100-max_dev, 100+max_dev])
+
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # --- MINI TABEL (Optioneel maar handig) ---
+                    # Toon snel de beste sectoren onder de grafiek
+                    st.markdown("#### 🏆 Sector Ranking (Dichtst bij 45°)")
+                    df_view = rrg_sec.copy()
+                    df_view['Afwijking_45'] = abs(df_view['Heading'] - 45)
+                    
+                    # Sorteer op beste heading (dichtst bij 45)
+                    top_sec = df_view.sort_values('Afwijking_45', ascending=True)
+                    
+                    st.dataframe(
+                        top_sec[['Label', 'Heading', 'Distance', 'Kwadrant']].style
+                        .background_gradient(subset=['Heading'], cmap='Greens', vmin=0, vmax=90)
+                        .format({"Heading": "{:.1f}°", "Distance": "{:.2f}"}),
+                        hide_index=True,
+                        use_container_width=True
+                    )
+
+                else: 
+                    st.warning("Geen sector data beschikbaar.")
+            else:
+                st.warning("Geen tickers gevonden voor deze markt.")
 import plotly.graph_objects as go # We hebben de low-level API nodig voor custom styling
 
 # === TAB 3: AANDELEN ===
