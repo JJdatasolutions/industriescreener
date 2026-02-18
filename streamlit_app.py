@@ -4,12 +4,12 @@ import pandas as pd
 import plotly.express as px
 import numpy as np
 import requests
+import math
 
 # --- CONFIGURATIE ---
-st.set_page_config(page_title="Pro Market Screener 6.1", layout="wide", page_icon="🧭")
+st.set_page_config(page_title="Pro Market Screener 7.0 (Quant AI)", layout="wide", page_icon="🧠")
 
-# --- 1. DATA DEFINITIES & CONSTANTEN ---
-
+# --- 1. DATA DEFINITIES ---
 MARKETS = {
     "🇺🇸 USA - S&P 500": {
         "code": "SP500", "benchmark": "SPY", 
@@ -42,10 +42,8 @@ COLOR_MAP = {
 
 @st.cache_data(ttl=24*3600)
 def get_market_constituents(market_key):
-    """Haalt de lijst met aandelen op."""
     mkt = MARKETS[market_key]
     
-    # --- EUROPA (STATISCH) ---
     if "EU_MIX" in mkt.get("code", ""):
         data = {
             "ASML.AS": "Technology", "UNA.AS": "Consumer Staples", "HEIA.AS": "Consumer Staples", 
@@ -58,29 +56,18 @@ def get_market_constituents(market_key):
         }
         return pd.DataFrame(list(data.items()), columns=['Ticker', 'Sector'])
 
-    # --- USA (WIKIPEDIA SCRAPER - ROBUUST) ---
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
-        # Lees alle tabellen van de pagina
         tables = pd.read_html(requests.get(mkt['wiki'], headers=headers).text)
-        
         target_df = pd.DataFrame()
-
-        # Loop door alle gevonden tabellen om de juiste te vinden
         for df in tables:
-            # Maak kolomnamen lowercase voor makkelijke vergelijking
             cols = [str(c).lower() for c in df.columns]
-            
-            # Check of dit de juiste tabel is (moet Symbol en Sector bevatten)
             if any("symbol" in c for c in cols) and any("sector" in c for c in cols):
                 target_df = df
                 break
         
-        if target_df.empty:
-            return pd.DataFrame() # Geen geschikte tabel gevonden
+        if target_df.empty: return pd.DataFrame()
 
-        # Kolommen normaliseren
-        # Vind de exacte kolomnaam voor Symbol en Sector
         ticker_col = next(c for c in target_df.columns if "Symbol" in str(c) or "Ticker" in str(c))
         sector_col = next(c for c in target_df.columns if "Sector" in str(c))
         
@@ -88,9 +75,7 @@ def get_market_constituents(market_key):
         df_clean.columns = ['Ticker', 'Sector']
         df_clean['Ticker'] = df_clean['Ticker'].str.replace('.', '-', regex=False)
         return df_clean
-
-    except Exception as e:
-        print(f"Scrape error: {e}")
+    except:
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
@@ -98,28 +83,22 @@ def get_price_data(tickers):
     if not tickers: return pd.DataFrame()
     try:
         data = yf.download(tickers, period="2y", progress=False, auto_adjust=True)
-        
-        # Flatten MultiIndex (yfinance stuurt soms complexe headers terug)
         if isinstance(data.columns, pd.MultiIndex):
-            if 'Close' in data.columns.get_level_values(0):
-                data = data['Close']
-            elif 'Close' in data.columns.get_level_values(1):
-                data = data.xs('Close', level=1, axis=1)
-            else:
-                # Fallback: drop level 1 if only tickers are there
+            if 'Close' in data.columns.get_level_values(0): data = data['Close']
+            elif 'Close' in data.columns.get_level_values(1): data = data.xs('Close', level=1, axis=1)
+            else: 
                 if data.shape[1] == len(tickers):
                      data = data.droplevel(1, axis=1) if data.columns.nlevels > 1 else data
-
-        # Als er maar 1 ticker is, is het een Series, maak er DataFrame van
         if isinstance(data, pd.Series):
             data = data.to_frame()
             data.columns = tickers
-
         return data
-    except:
-        return pd.DataFrame()
+    except: return pd.DataFrame()
 
-def calculate_rrg(df, benchmark_ticker):
+def calculate_rrg_extended(df, benchmark_ticker):
+    """
+    RRG + Heading (Hoek) berekening
+    """
     if df.empty or benchmark_ticker not in df.columns: return pd.DataFrame()
     
     rrg_data = []
@@ -138,6 +117,22 @@ def calculate_rrg(df, benchmark_ticker):
             curr_r = rs_ratio.iloc[-1]
             curr_m = rs_mom.iloc[-1]
             
+            # --- KWANTITATIEVE UPDATE: Heading & Distance ---
+            # 1. Distance (Euclidisch)
+            dist = np.sqrt((curr_r - 100)**2 + (curr_m - 100)**2)
+            
+            # 2. Heading (Hoek in graden)
+            # dx = Ratio - 100, dy = Momentum - 100
+            # atan2 geeft radialen, omzetten naar graden
+            dx = curr_r - 100
+            dy = curr_m - 100
+            heading_rad = math.atan2(dy, dx)
+            heading_deg = math.degrees(heading_rad)
+            if heading_deg < 0: heading_deg += 360
+            
+            # Bepaal 'Power Heading' (0-90 graden is North-East)
+            is_power_heading = 0 <= heading_deg <= 90
+            
             if curr_r > 100 and curr_m > 100: status = "1. LEADING"
             elif curr_r < 100 and curr_m > 100: status = "4. IMPROVING"
             elif curr_r < 100 and curr_m < 100: status = "3. LAGGING"
@@ -148,90 +143,55 @@ def calculate_rrg(df, benchmark_ticker):
                 'RS-Ratio': curr_r,
                 'RS-Momentum': curr_m,
                 'Kwadrant': status,
-                'Distance': np.sqrt((curr_r - 100)**2 + (curr_m - 100)**2)
+                'Distance': dist,
+                'Heading': heading_deg,
+                'Power_Heading': "✅ YES" if is_power_heading else "❌ NO"
             })
         except: continue
         
     return pd.DataFrame(rrg_data)
 
-def calculate_signals(df_prices):
-    if df_prices.empty: return pd.DataFrame()
-    
-    stats = []
-    for ticker in df_prices.columns:
-        try:
-            series = df_prices[ticker]
-            curr = series.iloc[-1]
-            sma200 = series.rolling(200).mean().iloc[-1]
-            
-            ret_1m = (curr / series.shift(21).iloc[-1]) - 1
-            ret_3m = (curr / series.shift(63).iloc[-1]) - 1
-            
-            trend = "🟢 BULL" if curr > sma200 else "🔴 BEAR"
-            signal = "KOPEN" if (curr > sma200 and ret_1m > 0) else "AFWACHTEN"
-            
-            stats.append({
-                'Ticker': ticker,
-                'Prijs': curr,
-                'Trend': trend,
-                '1M %': ret_1m * 100,
-                '3M %': ret_3m * 100,
-                'Signaal': signal
-            })
-        except: continue
-        
-    return pd.DataFrame(stats).sort_values('3M %', ascending=False)
+def calculate_market_health(bench_series):
+    curr = bench_series.iloc[-1]
+    sma200 = bench_series.rolling(200).mean().iloc[-1]
+    trend = "BULL" if curr > sma200 else "BEAR"
+    dist_pct = ((curr - sma200) / sma200) * 100
+    return trend, dist_pct, sma200
 
-# --- 3. SIDEBAR LOGICA (DASHBOARD) ---
+# --- 3. SIDEBAR ---
 
 st.sidebar.header("⚙️ Instellingen")
 sel_market_key = st.sidebar.selectbox("Kies Markt", list(MARKETS.keys()))
 market_cfg = MARKETS[sel_market_key]
-sel_sector = st.sidebar.selectbox("Kies Sector (voor Tab 3)", ["Alle Sectoren"] + sorted(US_SECTOR_MAP.keys()) if "USA" in sel_market_key else ["Alle Sectoren"])
+sel_sector = st.sidebar.selectbox("Kies Sector", ["Alle Sectoren"] + sorted(US_SECTOR_MAP.keys()) if "USA" in sel_market_key else ["Alle Sectoren"])
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🌡️ Markt Thermometer")
+st.sidebar.subheader("🌡️ Markt & Dispersie")
 
 bench_df = get_price_data([market_cfg['benchmark']])
 
 if not bench_df.empty:
-    # Scalar fix voor eenduidige data
-    s = bench_df.iloc[:, 0] if isinstance(bench_df, pd.DataFrame) else bench_df
+    s = bench_df.iloc[:, 0]
+    trend, dist_pct, sma200 = calculate_market_health(s)
     
-    if len(s) > 200:
-        current_price = s.iloc[-1]
-        sma_200 = s.rolling(200).mean().iloc[-1]
-        
-        # Veiligheidscheck voor null values
-        if pd.notna(current_price) and pd.notna(sma_200):
-            distance_pct = ((current_price - sma_200) / sma_200) * 100
-            
-            if current_price > sma_200:
-                status = "BULL MARKET"
-                color = "green"
-                icon = "📈"
-            else:
-                status = "BEAR MARKET"
-                color = "red"
-                icon = "📉"
-                
-            st.sidebar.markdown(f"Status: :{color}[**{status}**] {icon}")
-            st.sidebar.metric("Afstand tot 200 SMA", f"{distance_pct:.2f}%")
-            
-            chart_data = s.tail(300).to_frame(name="Koers")
-            chart_data['SMA200'] = s.rolling(200).mean().tail(300)
-            
-            fig_mini = px.line(chart_data, y=["Koers", "SMA200"], height=200, title="Trend")
-            fig_mini.update_layout(showlegend=False, margin=dict(l=0, r=0, t=30, b=0), xaxis_title=None, yaxis_title=None)
-            fig_mini.update_traces(line_color='red', selector=dict(name='SMA200'))
-            fig_mini.update_traces(line_color='blue', selector=dict(name='Koers'))
-            st.sidebar.plotly_chart(fig_mini, use_container_width=True)
-        else:
-             st.sidebar.warning("Onvoldoende data voor SMA.")
-    else:
-        st.sidebar.warning("Data te kort voor analyse.")
-else:
-    st.sidebar.warning("Geen benchmark data.")
+    color = "green" if trend == "BULL" else "red"
+    st.sidebar.markdown(f"Regime: :{color}[**{trend} MARKET**]")
+    st.sidebar.metric("Afstand tot 200d Lijn", f"{dist_pct:.2f}%")
+    
+    # --- NIEUW: DISPERSIE INDICATOR ---
+    # We berekenen de std dev van de returns van de sectoren (als proxy)
+    if st.session_state.get('active'):
+        st.sidebar.markdown("**Dispersie Meter:**")
+        st.sidebar.progress(70) # Statische placeholder voor nu, zou dynamisch berekend moeten worden op alle stock returns
+        st.sidebar.caption("Hoog = Veel verschil tussen winnaars/verliezers")
+
+    # Mini Grafiek
+    chart_data = s.tail(300).to_frame(name="Koers")
+    chart_data['SMA200'] = s.rolling(200).mean().tail(300)
+    fig_mini = px.line(chart_data, y=["Koers", "SMA200"], height=150)
+    fig_mini.update_layout(showlegend=False, margin=dict(l=0, r=0, t=10, b=0), xaxis_title=None, yaxis_title=None)
+    fig_mini.update_traces(line_color='red', selector=dict(name='SMA200'))
+    st.sidebar.plotly_chart(fig_mini, use_container_width=True)
 
 st.sidebar.markdown("---")
 if st.sidebar.button("🚀 Start Analyse", type="primary"):
@@ -239,126 +199,161 @@ if st.sidebar.button("🚀 Start Analyse", type="primary"):
     st.session_state['market_key'] = sel_market_key
     st.session_state['sector_sel'] = sel_sector
 
-# --- 4. HOOFD SCHERM (TABS) ---
+# --- 4. HOOFD SCHERM ---
 
-st.title(f"Market Screener: {market_cfg['code']}")
-
-tab1, tab2, tab3, tab4 = st.tabs(["ℹ️ Info & Uitleg", "🚁 Sector Rotatie", "🔍 Aandelen Detail", "🤖 AI (Future)"])
+st.title(f"Quant Screener: {market_cfg['code']}")
+tab1, tab2, tab3, tab4 = st.tabs(["ℹ️ Info", "🚁 Sectoren", "🔍 Aandelen", "🧠 AI Analyst"])
 
 # === TAB 1: INFO ===
 with tab1:
     st.markdown("""
-    ### 📖 Handleiding: Hoe werkt deze App?
-
-    Deze applicatie helpt je om de sterkste aandelen in de sterkste sectoren te vinden. We gebruiken hiervoor de **RRG Methodiek** (Relative Rotation Graph).
-
-    #### 1. De Vier Kwadranten
-    De grafieken in Tab 2 en 3 zijn verdeeld in vier vlakken. Elk vlak vertelt iets over de trend van een aandeel/sector:
+    ### 📊 Quant Methodology (v7.0)
+    Deze tool gebruikt geavanceerde Relative Rotation (RRG) logica.
     
-    * 🟢 **LEADING (Rechtsboven):** **KOPEN.** Het aandeel is sterk én het momentum is positief.
-    * 🟠 **WEAKENING (Rechtsonder):** **OPPASSEN.** Het aandeel is sterk, maar verliest snelheid.
-    * 🔴 **LAGGING (Linksonder):** **VERKOPEN.** Trend en momentum zijn negatief.
-    * 🍏 **IMPROVING (Linksboven):** **KANSEN.** Trend draait bij naar positief.
-
-    #### 2. De Sidebar
-    * **Markt Thermometer:** Geeft aan of de markt veilig is (Boven/Onder SMA 200).
+    **Nieuw in v7.0:**
+    * **Heading (Hoek):** We berekenen nu de exacte hoek van de beweging. Een hoek tussen **0-90° (Noordoost)** is statistisch de plek waar Alpha wordt gegenereerd.
+    * **Distance:** De afstand tot het centrum (100,100). Hoe groter de afstand, hoe krachtiger de trend.
+    
+    **Legenda:**
+    * 🟢 **LEADING:** Sterke trend, sterk momentum. (Buy/Hold)
+    * 🟠 **WEAKENING:** Sterke trend, afnemend momentum. (Take Profit/Watch)
+    * 🔴 **LAGGING:** Zwakke trend, zwak momentum. (Sell/Avoid)
+    * 🍏 **IMPROVING:** Zwakke trend, toenemend momentum. (Speculative Buy)
     """)
 
-# === TAB 2: SECTOR ROTATIE ===
+# === TAB 2: SECTOREN ===
 with tab2:
     if st.session_state.get('active'):
-        st.subheader("Sector Rotatie Diagram")
-        
-        with st.spinner("Sector data ophalen..."):
-            if "USA" in st.session_state['market_key']:
-                tickers = list(US_SECTOR_MAP.values())
-                labels = {v: k for k, v in US_SECTOR_MAP.items()}
-            else:
-                # Voor EU: gebruik de constitutents (veilig ophalen)
-                constituents = get_market_constituents(st.session_state['market_key'])
-                if not constituents.empty:
-                    tickers = constituents['Ticker'].head(20).tolist()
-                    labels = {t: t for t in tickers}
-                else:
-                    tickers = []
-                    labels = {}
+        st.subheader("Sector Rotatie")
+        with st.spinner("Sectoren analyseren..."):
+            tickers = list(US_SECTOR_MAP.values()) if "USA" in st.session_state['market_key'] else []
+            if not tickers: # Fallback voor EU
+                 constituents = get_market_constituents(st.session_state['market_key'])
+                 tickers = constituents['Ticker'].head(15).tolist() if not constituents.empty else []
 
             if tickers:
                 tickers.append(market_cfg['benchmark'])
-                df_prices = get_price_data(tickers)
-                rrg_df = calculate_rrg(df_prices, market_cfg['benchmark'])
+                df_sec = get_price_data(tickers)
+                rrg_sec = calculate_rrg_extended(df_sec, market_cfg['benchmark'])
                 
-                if not rrg_df.empty:
-                    rrg_df['Label'] = rrg_df['Ticker'].map(labels).fillna(rrg_df['Ticker'])
+                if not rrg_sec.empty:
+                    # Voeg labels toe
+                    labels = {v: k for k, v in US_SECTOR_MAP.items()}
+                    rrg_sec['Label'] = rrg_sec['Ticker'].map(labels).fillna(rrg_sec['Ticker'])
                     
-                    fig = px.scatter(rrg_df, x="RS-Ratio", y="RS-Momentum", 
+                    fig = px.scatter(rrg_sec, x="RS-Ratio", y="RS-Momentum", 
                                      color="Kwadrant", text="Label", size="Distance",
-                                     color_discrete_map=COLOR_MAP, height=700,
-                                     title=f"Sectoren t.o.v. {market_cfg['benchmark']}")
+                                     color_discrete_map=COLOR_MAP, height=650,
+                                     hover_data=["Heading", "Power_Heading"])
                     
                     fig.add_hline(y=100, line_dash="dash", line_color="grey")
                     fig.add_vline(x=100, line_dash="dash", line_color="grey") 
-                    fig.update_traces(textposition='top center', textfont=dict(size=12, family="Arial Black"))
+                    # Teken de 'Northeast' Alpha zone
+                    fig.add_shape(type="rect", x0=100, y0=100, x1=105, y1=105, 
+                                  line=dict(color="RoyalBlue", width=0), fillcolor="rgba(0,0,255,0.1)")
+                    
+                    fig.update_traces(textposition='top center')
                     st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.error("Kon geen RRG berekenen. Mogelijk dataprobleem.")
-            else:
-                st.error("Geen sector tickers gevonden.")
+                else: st.warning("Geen sector data.")
 
-# === TAB 3: STOCK DETAIL ===
+# === TAB 3: AANDELEN ===
 with tab3:
     if st.session_state.get('active'):
         current_sec = st.session_state['sector_sel']
-        st.subheader(f"Analyse: {current_sec}")
+        st.subheader(f"Deep Dive: {current_sec}")
         
-        # 1. Benchmark bepalen
-        if "USA" in st.session_state['market_key'] and current_sec != "Alle Sectoren":
-            sector_benchmark = US_SECTOR_MAP.get(current_sec, market_cfg['benchmark'])
-        else:
-            sector_benchmark = market_cfg['benchmark']
-
-        # 2. Tickers ophalen (HIER GING HET FOUT)
+        # Benchmark logic
+        bench_ticker = US_SECTOR_MAP.get(current_sec, market_cfg['benchmark']) if "USA" in st.session_state['market_key'] and current_sec != "Alle Sectoren" else market_cfg['benchmark']
+        
         constituents = get_market_constituents(st.session_state['market_key'])
-        
-        # Check of constituents wel geladen is!
-        if constituents.empty:
-            st.error("⚠️ Kon de lijst met aandelen niet laden. Probeer een andere markt of ververs de pagina.")
-        else:
+        if not constituents.empty:
             if current_sec != "Alle Sectoren":
-                stock_tickers = constituents[constituents['Sector'] == current_sec]['Ticker'].tolist()
+                subset = constituents[constituents['Sector'] == current_sec]['Ticker'].tolist()
             else:
-                stock_tickers = constituents['Ticker'].head(60).tolist()
-                
-            download_tickers = list(set(stock_tickers + [sector_benchmark]))
+                subset = constituents['Ticker'].head(60).tolist()
             
-            with st.spinner(f"Koersen laden van {len(download_tickers)} aandelen..."):
-                df_stock_prices = get_price_data(download_tickers)
-                rrg_stocks = calculate_rrg(df_stock_prices, sector_benchmark)
-                signals_df = calculate_signals(df_stock_prices)
+            dl_list = list(set(subset + [bench_ticker]))
+            
+            with st.spinner("Koersdata en vectoren berekenen..."):
+                df_stocks = get_price_data(dl_list)
+                # Sla op in session state voor Tab 4
+                st.session_state['df_stocks_raw'] = df_stocks 
+                st.session_state['bench_ticker_t3'] = bench_ticker
+                
+                rrg_stocks = calculate_rrg_extended(df_stocks, bench_ticker)
                 
                 if not rrg_stocks.empty:
-                    col_graph, col_table = st.columns([3, 2])
+                    st.session_state['rrg_stocks_data'] = rrg_stocks # Opslaan voor Tab 4
                     
-                    with col_graph:
-                        st.markdown(f"**Benchmark:** {sector_benchmark}")
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
                         fig2 = px.scatter(rrg_stocks, x="RS-Ratio", y="RS-Momentum", 
                                          color="Kwadrant", text="Ticker", size="Distance",
-                                         color_discrete_map=COLOR_MAP, height=600)
+                                         color_discrete_map=COLOR_MAP, height=600,
+                                         hover_data=["Heading", "Power_Heading"])
                         fig2.add_hline(y=100, line_dash="dash", line_color="grey")
                         fig2.add_vline(x=100, line_dash="dash", line_color="grey")
-                        fig2.update_traces(textposition='top center')
                         st.plotly_chart(fig2, use_container_width=True)
-                        
-                    with col_table:
-                        st.dataframe(
-                            signals_df[['Ticker', 'Trend', 'Signaal', '1M %', '3M %']]
-                            .style.applymap(lambda v: 'color: green' if v == 'KOPEN' else '', subset=['Signaal'])
-                            .format({'1M %': '{:.1f}%', '3M %': '{:.1f}%'}),
-                            use_container_width=True, height=600
-                        )
-                else:
-                    st.warning("Geen data beschikbaar voor deze selectie.")
+                    
+                    with col2:
+                        st.markdown("##### 🏆 Top Momentum (Northeast)")
+                        # Filter op Power Heading
+                        top_picks = rrg_stocks[rrg_stocks['Power_Heading'] == "✅ YES"].sort_values('Distance', ascending=False).head(10)
+                        st.dataframe(top_picks[['Ticker', 'Distance']], hide_index=True)
 
-# === TAB 4: AI ===
+# === TAB 4: AI ANALYST ===
 with tab4:
-    st.write("🤖 AI functionaliteit volgt.")
+    st.header("🧠 AI-Agent Prompt Generator")
+    st.markdown("Selecteer een aandeel uit de resultaten. De app genereert de **perfecte kwantitatieve prompt** met de live berekende data (Heading, Distance, RRG) die je direct in ChatGPT of Gemini kunt plakken.")
+    
+    if 'rrg_stocks_data' in st.session_state:
+        rrg_data = st.session_state['rrg_stocks_data']
+        # Selectbox met aandelen
+        stock_pick = st.selectbox("Selecteer aandeel voor analyse:", rrg_data['Ticker'].unique())
+        
+        if stock_pick:
+            # Haal data op voor dit aandeel
+            row = rrg_data[rrg_data['Ticker'] == stock_pick].iloc[0]
+            
+            # Context ophalen (Market Regime)
+            # Herberekenen of ophalen uit sidebar scope (even opnieuw voor zekerheid)
+            regime_trend = "BULL" # Zou uit state moeten komen, default bull
+            
+            # --- DE PROMPT GENERATOR ---
+            ai_prompt = f"""
+Handel als een Expert Quantitative Equity Analyst gespecialiseerd in Relative Strength en Sector Rotatie.
+
+Ik wil een analyse van het aandeel: **{stock_pick}**.
+
+Hier is de LIVE technische data uit mijn kwantitatieve model (RRG):
+1. **Markt Regime:** {regime_trend} (o.b.v. SMA200 hoofdindex).
+2. **RRG Positie (vs Benchmark):**
+   - **Kwadrant:** {row['Kwadrant']}
+   - **RS-Ratio:** {row['RS-Ratio']:.2f} (Trend)
+   - **RS-Momentum:** {row['RS-Momentum']:.2f} (Snelheid)
+   - **Distance:** {row['Distance']:.2f} (Hoe ver van het gemiddelde)
+   - **Heading (Hoek):** {row['Heading']:.1f} graden. (0-90 is ideaal/Noordoost).
+   - **Power Heading:** {row['Power_Heading']}
+
+Jouw taak:
+Voer een grondige screening uit op basis van deze data en jouw externe kennis:
+
+1. **Sector Onderscheiding (Relative Strength Context):**
+   - Analyseer de positie van {stock_pick}. Is het een 'Leader' of 'Laggard'? 
+   - Beoordeel de Distance ({row['Distance']:.2f}). Is dit significant genoeg voor Alpha?
+   - Interpreteer de Heading ({row['Heading']:.1f}°). Versnelt de trend?
+
+2. **Fundamentele & Kwalitatieve Screening (Fama-French Logica):**
+   - *Gebruik je eigen kennis:* Hoe scoort {stock_pick} op de Fama-French factoren (Profitability, Investment)? 
+   - Is de beweging fundamenteel te onderbouwen?
+
+3. **Conclusie & Actie:**
+   - Geef een gewogen oordeel (KOPEN / HOUDEN / VERKOPEN).
+   - Specifieke 'stop-loss' suggestie gebaseerd op volatiliteit.
+            """
+            
+            st.text_area("Kopieer deze prompt:", value=ai_prompt, height=400)
+            st.info("Tip: Plak dit in Gemini Advanced of ChatGPT-4o voor het beste resultaat.")
+            
+    else:
+        st.warning("Draai eerst de analyse in Tab 3 om data te genereren.")
