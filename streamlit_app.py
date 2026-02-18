@@ -45,7 +45,7 @@ US_SECTOR_ETFS = {
     'Comm Services': 'XLC', 'Staples': 'XLP'
 }
 
-# STATIC DATA EU (Om sector filters mogelijk te maken zonder Yahoo data)
+# STATIC DATA EU
 STATIC_EU_DATA = {
     # NL
     "ASML.AS": "Technology", "UNA.AS": "Staples", "HEIA.AS": "Staples", "SHELL.AS": "Energy", 
@@ -61,7 +61,7 @@ STATIC_EU_DATA = {
     "XIOR.BR": "Real Estate", "TNET.BR": "Comm Services", "PROX.BR": "Comm Services"
 }
 
-# KLEURENPALET (Eenduidig)
+# KLEURENPALET
 COLOR_MAP = {
     "1. LEADING": "#006400",   # Donkergroen
     "2. WEAKENING": "#FFA500", # Oranje
@@ -75,7 +75,6 @@ COLOR_MAP = {
 def get_market_constituents(market_code):
     """Haalt tickers en sectoren op."""
     if market_code in ["SP500", "SP400"]:
-        # WIKI SCRAPING VOOR US
         current_market = next(v for k, v in MARKETS.items() if v['code'] == market_code)
         url = current_market['wiki_url']
         try:
@@ -93,7 +92,6 @@ def get_market_constituents(market_code):
             st.error(f"Fout bij ophalen Wikipedia data: {e}")
             return pd.DataFrame()
     else:
-        # STATIC DATA VOOR EU
         suffix = ".AS" if market_code == "NL" else ".BR"
         filtered = {k: v for k, v in STATIC_EU_DATA.items() if k.endswith(suffix)}
         return pd.DataFrame(list(filtered.items()), columns=['Ticker', 'Sector'])
@@ -102,13 +100,11 @@ def get_market_constituents(market_code):
 def get_price_data(tickers):
     if not tickers: return pd.DataFrame()
     try:
-        # 2 jaar historie voor lange termijn trends
         return yf.download(tickers, period="2y", progress=False, auto_adjust=True)['Close']
     except:
         return pd.DataFrame()
 
 def calculate_market_regime(ticker):
-    """Check of Index boven 200 SMA zit."""
     try:
         data = yf.download(ticker, period="2y", progress=False, auto_adjust=True)['Close']
         if data.empty: return "UNKNOWN"
@@ -119,7 +115,7 @@ def calculate_market_regime(ticker):
         return "UNKNOWN"
 
 def calculate_rrg_metrics(df, benchmark):
-    """Berekent RRG data en wijst de juiste kleuren/fases toe."""
+    """Berekent klassieke RRG data (voor Tab 1)."""
     if benchmark not in df.columns: return pd.DataFrame()
     
     rrg_list = []
@@ -139,16 +135,13 @@ def calculate_rrg_metrics(df, benchmark):
         curr_m = rs_mom.iloc[-1]
         
         if pd.notna(curr_r) and pd.notna(curr_m):
-            # Fase bepaling met nummers voor sortering in legende
             if curr_r > 100 and curr_m > 100: status = "1. LEADING"
-            elif curr_r < 100 and curr_m > 100: status = "4. IMPROVING" # Let op: Improving zit linksboven
+            elif curr_r < 100 and curr_m > 100: status = "4. IMPROVING"
             elif curr_r < 100 and curr_m < 100: status = "3. LAGGING"
             else: status = "2. WEAKENING"
             
-            # Distance
             distance = np.sqrt((curr_r - 100)**2 + (curr_m - 100)**2)
             
-            # Naam
             name = col
             for k, v in US_SECTOR_ETFS.items():
                 if v == col: name = k
@@ -160,6 +153,48 @@ def calculate_rrg_metrics(df, benchmark):
             })
             
     return pd.DataFrame(rrg_list)
+
+def calculate_sector_rrg_metrics(df_prices):
+    """
+    NIEUW: Berekent RRG op basis van RELATIEVE performance t.o.v. de SECTOR (het gemiddelde).
+    """
+    if df_prices.empty: return pd.DataFrame()
+
+    # 1. Rendementen berekenen
+    # Lange termijn trend (bv. 60 dagen / 3 maanden)
+    ret_long = (df_prices.iloc[-1] - df_prices.shift(60).iloc[-1]) / df_prices.shift(60).iloc[-1] * 100
+    
+    # Korte termijn momentum (bv. 10 dagen / 2 weken)
+    ret_short = (df_prices.iloc[-1] - df_prices.shift(10).iloc[-1]) / df_prices.shift(10).iloc[-1] * 100
+
+    # 2. Benchmark bepalen (het gemiddelde van deze groep)
+    avg_long = ret_long.mean()
+    avg_short = ret_short.mean()
+
+    # 3. Dataframe bouwen
+    metrics = pd.DataFrame({
+        'Ret_Long': ret_long,
+        'Ret_Short': ret_short
+    })
+
+    # 4. Relatieve scores berekenen (centreren rond 0)
+    metrics['X_Trend'] = metrics['Ret_Long'] - avg_long
+    metrics['Y_Momentum'] = metrics['Ret_Short'] - avg_short
+
+    # 5. Kwadranten toewijzen
+    def get_quadrant(row):
+        x, y = row['X_Trend'], row['Y_Momentum']
+        if x > 0 and y > 0: return "1. LEADING"
+        if x > 0 and y < 0: return "2. WEAKENING"
+        if x < 0 and y < 0: return "3. LAGGING"
+        if x < 0 and y > 0: return "4. IMPROVING"
+        return "Unknown"
+
+    metrics['Kwadrant'] = metrics.apply(get_quadrant, axis=1)
+    metrics['Ticker'] = metrics.index
+    metrics['Distance'] = np.sqrt(metrics['X_Trend']**2 + metrics['Y_Momentum']**2) # Voor bolgrootte
+
+    return metrics.dropna()
 
 def calculate_ranking(df):
     if df.empty or len(df) < 130: return pd.DataFrame()
@@ -178,12 +213,10 @@ def calculate_ranking(df):
     }).sort_values('Score', ascending=False).dropna()
 
 def get_gemini_advice(ticker, key, market_status, sector):
-    """Vraagt advies aan Google Gemini 1.5 Pro (Best available)."""
     if not key: return "⚠️ Voer eerst een Google Gemini sleutel in."
     
     try:
         genai.configure(api_key=key)
-        # We gebruiken 1.5 Pro voor de beste kwaliteit ("2.5" ervaring)
         model = genai.GenerativeModel('gemini-1.5-pro') 
         
         stock = yf.Ticker(ticker)
@@ -240,32 +273,31 @@ with st.spinner("Laden data..."):
     all_tickers = constituents_df['Ticker'].tolist()
 
 # TABS
-tab0, tab1, tab2, tab3 = st.tabs(["ℹ️ Info", "📊 Sector RRG", "🏆 Filter & Ranking", "🤖 AI Advies"])
+tab0, tab1, tab2, tab3 = st.tabs(["ℹ️ Info", "📊 Market RRG", "🏆 Sector Drill-down", "🤖 AI Advies"])
 
 # TAB 0: INFO
 with tab0:
     st.markdown("""
-    ### 📊 Legende Sector Analyse
-    De kleuren in Tabblad 1 (RRG) hebben een vaste betekenis:
-    * 🟢 **LEADING (Donkergroen):** Sterke trend + Positief momentum. (Kopen)
-    * 🟠 **WEAKENING (Oranje):** Sterke trend, maar verliest snelheid. (Winst nemen?)
-    * 🔴 **LAGGING (Rood):** Slechte trend + Negatief momentum. (Vermijden)
-    * 🍏 **IMPROVING (Lichtgroen):** Trend draait bij naar positief. (Kansen)
-    """)
-
-# TAB 1: RRG
-with tab1:
-    st.subheader(f"Relative Rotation Graph ({benchmark_ticker})")
+    ### 📊 Legende RRG (Relative Rotation Graph)
+    Of je nu naar de hele markt kijkt of naar één sector, de kleuren betekenen altijd hetzelfde:
     
-    # Bepaal wat we plotten
+    * 🟢 **LEADING (Rechtsboven):** **Kopen**. Dit aandeel verslaat de rest en het momentum is sterk.
+    * 🟠 **WEAKENING (Rechtsonder):** **Oppassen**. Het aandeel is nog steeds sterk, maar verliest snelheid.
+    * 🔴 **LAGGING (Linksonder):** **Verkopen**. Dit aandeel doet het slechter dan de groep en zakt verder weg.
+    * 🍏 **IMPROVING (Linksboven):** **Opletten**. Het aandeel was slecht, maar begint nu kracht te tonen.
+    """)
+    
+
+# TAB 1: RRG (MARKET LEVEL)
+with tab1:
+    st.subheader(f"Market Level RRG ({benchmark_ticker})")
+    
     if "USA" in sel_market_key:
-        # Voor USA plotten we de Sector ETFs voor overzicht
         tickers_to_plot = list(US_SECTOR_ETFS.values())
-        st.caption("We tonen hier de US Sector ETFs voor een helder overzicht.")
+        st.caption("Overzicht van de US Sectoren.")
     else:
-        # Voor EU plotten we de individuele aandelen
         tickers_to_plot = all_tickers
-        st.caption(f"We tonen alle aandelen uit de {market_code}.")
+        st.caption(f"Overzicht van alle aandelen in {market_code}.")
 
     raw_data = get_price_data(tickers_to_plot + [benchmark_ticker])
     
@@ -273,17 +305,14 @@ with tab1:
         rrg_metrics = calculate_rrg_metrics(raw_data, benchmark_ticker)
         
         if not rrg_metrics.empty:
-            # PLOT MET VASTE KLEUREN
             fig = px.scatter(
                 rrg_metrics, x="RS-Ratio", y="RS-Momentum",
-                color="Kwadrant", # Gebruik altijd de Kwadrant voor kleur
-                text="Naam", size="Distance",
-                color_discrete_map=COLOR_MAP, # Forceer jouw kleuren
-                title=f"RRG: {market_code}", height=700,
+                color="Kwadrant", text="Naam", size="Distance",
+                color_discrete_map=COLOR_MAP,
+                title=f"RRG: {market_code}", height=600,
                 hover_data=["Kwadrant"]
             )
-            
-            # Layout
+            # Layout Shapes
             fig.add_hline(y=100, line_dash="dash", line_color="gray")
             fig.add_vline(x=100, line_dash="dash", line_color="gray")
             fig.add_shape(type="rect", x0=100, y0=100, x1=115, y1=115, fillcolor="green", opacity=0.1, line_width=0)
@@ -291,24 +320,77 @@ with tab1:
         else:
             st.warning("Te weinig data voor RRG.")
 
-# TAB 2: FILTER & RANKING
+# TAB 2: FILTER & SECTOR RRG (STOCK LEVEL)
 with tab2:
-    st.subheader("🔍 Stock Screener")
+    st.subheader("🔍 Stock Screener & Sector Drill-down")
     
-    # UNIVERSELE SECTOR FILTER
+    # 1. Selectie
     available_sectors = sorted(constituents_df['Sector'].unique().tolist())
-    selected_sector = st.selectbox("📂 Filter op Sector:", ["Alle Sectoren"] + available_sectors)
+    col_filter, col_dummy = st.columns([1,2])
+    with col_filter:
+        selected_sector = st.selectbox("📂 Filter op Sector:", ["Alle Sectoren"] + available_sectors)
     
+    # 2. Filtering
     if selected_sector != "Alle Sectoren":
         filtered_tickers = constituents_df[constituents_df['Sector'] == selected_sector]['Ticker'].tolist()
+        st.success(f"Geselecteerd: {len(filtered_tickers)} aandelen in {selected_sector}")
     else:
         filtered_tickers = all_tickers
+        st.info(f"Totaal: {len(filtered_tickers)} aandelen (Kies een sector voor gedetailleerde RRG)")
         
     if st.button("🚀 Start Analyse"):
-        with st.spinner("Analyseren..."):
+        with st.spinner(f"Analyseren van {selected_sector}..."):
             stock_data = get_price_data(filtered_tickers)
+            
             if not stock_data.empty:
+                # --- NIEUW: SECTOR RRG VISUALISATIE ---
+                # Alleen tonen als er een specifieke sector is gekozen (anders wordt de plot te druk/onleesbaar)
+                if selected_sector != "Alle Sectoren" and len(filtered_tickers) > 2:
+                    st.markdown("---")
+                    st.subheader(f"📊 Sector RRG: {selected_sector}")
+                    
+                    # Berekenen van de relatieve data
+                    sector_rrg_df = calculate_sector_rrg_metrics(stock_data)
+                    
+                    if not sector_rrg_df.empty:
+                        # Uitleg uitklapper
+                        with st.expander("ℹ️ Hoe lees ik deze grafiek?"):
+                            st.markdown(f"""
+                            Deze grafiek toont hoe elk aandeel presteert **ten opzichte van het gemiddelde van de {selected_sector} sector**.
+                            * **Centrum (0,0):** Het sectorgemiddelde.
+                            * **Rechts:** Sterker dan de sectorgenoten.
+                            * **Boven:** Momentum neemt toe.
+                            """)
+
+                        # Plotten
+                        fig_sec = px.scatter(
+                            sector_rrg_df, 
+                            x="X_Trend", 
+                            y="Y_Momentum",
+                            color="Kwadrant", 
+                            text="Ticker", 
+                            size="Distance",
+                            color_discrete_map=COLOR_MAP,
+                            title=f"Relative Rotation binnen {selected_sector}",
+                            labels={"X_Trend": "Trend (vs Sector)", "Y_Momentum": "Momentum (vs Sector)"},
+                            height=600
+                        )
+                        
+                        # Assen kruis
+                        fig_sec.add_hline(y=0, line_color="black", line_width=1)
+                        fig_sec.add_vline(x=0, line_color="black", line_width=1)
+                        # Groene zone
+                        max_x = sector_rrg_df['X_Trend'].max()
+                        max_y = sector_rrg_df['Y_Momentum'].max()
+                        fig_sec.add_shape(type="rect", x0=0, y0=0, x1=max_x, y1=max_y, fillcolor="green", opacity=0.1, line_width=0)
+                        
+                        st.plotly_chart(fig_sec, use_container_width=True)
+
+                # --- STANDAARD TABEL ---
+                st.markdown("---")
+                st.subheader(f"🏆 Ranking Lijst ({selected_sector})")
                 rank_df = calculate_ranking(stock_data)
+                
                 if not rank_df.empty:
                     st.session_state['top_pick'] = rank_df.iloc[0]['Ticker']
                     
