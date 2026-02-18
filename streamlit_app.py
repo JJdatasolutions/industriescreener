@@ -313,51 +313,94 @@ with tab2:
 # === TAB 3: AANDELEN ===
 with tab3:
     if st.session_state.get('active'):
-        current_sec = st.session_state['sector_sel']
+        current_sec = st.session_state.get('sector_sel', 'Alle Sectoren') # Veilige get
         st.subheader(f"Deep Dive: {current_sec}")
         
-        # Benchmark logic
-        bench_ticker = US_SECTOR_MAP.get(current_sec, market_cfg['benchmark']) if "USA" in st.session_state['market_key'] and current_sec != "Alle Sectoren" else market_cfg['benchmark']
+        # 1. Bepaal Benchmark voor deze selectie
+        if "USA" in st.session_state['market_key'] and current_sec != "Alle Sectoren":
+            bench_ticker = US_SECTOR_MAP.get(current_sec, market_cfg['benchmark'])
+        else:
+            bench_ticker = market_cfg['benchmark']
         
+        # 2. Haal tickers op
         constituents = get_market_constituents(st.session_state['market_key'])
+        
         if not constituents.empty:
+            # Filter op sector of pak top 60 (om performance te sparen)
             if current_sec != "Alle Sectoren":
                 subset = constituents[constituents['Sector'] == current_sec]['Ticker'].tolist()
             else:
-                subset = constituents['Ticker'].head(60).tolist()
+                subset = constituents['Ticker'].head(60).tolist() # Limiet om laadtijd te beperken
             
+            # Voeg benchmark toe aan de lijst en ontdubbel
             dl_list = list(set(subset + [bench_ticker]))
             
-            with st.spinner("Koersdata en vectoren berekenen..."):
-                df_stocks = get_price_data(dl_list)
-                # Sla op in session state voor Tab 4
-                st.session_state['df_stocks_raw'] = df_stocks 
-                st.session_state['bench_ticker_t3'] = bench_ticker
-                
-                rrg_stocks = calculate_rrg_extended(df_stocks, bench_ticker)
-                
-                if not rrg_stocks.empty:
-                    # --- FIX START: Data opschonen voor Plotly ---
-                    # 1. Verwijder rijen waar data ontbreekt (NaN)
-                    rrg_stocks = rrg_stocks.dropna(subset=['RS-Ratio', 'RS-Momentum', 'Distance', 'Kwadrant'])
-                    
-                    # 2. Zorg dat Distance groter is dan 0 (Plotly crasht op size=0 of NaN)
-                    rrg_stocks = rrg_stocks[rrg_stocks['Distance'] > 0]
-                    
-                    # 3. Check of er nog data over is na het filteren
-                    if rrg_stocks.empty:
-                        st.warning("Geen geldige data overgebleven na filtering.")
-                        st.stop()
-                    # --- FIX END ---
+            st.info(f"Koersdata ophalen voor {len(dl_list)} aandelen... even geduld.")
 
-                    st.session_state['rrg_stocks_data'] = rrg_stocks # Opslaan voor Tab 4
+            # 3. Download Data
+            df_stocks = get_price_data(dl_list)
+            
+            # DEBUG: Check of data binnenkomt
+            if df_stocks.empty:
+                st.error("❌ Geen koersdata ontvangen van Yahoo Finance. Probeer het later opnieuw.")
+                st.stop()
+            
+            # Opslaan in state
+            st.session_state['df_stocks_raw'] = df_stocks 
+            st.session_state['bench_ticker_t3'] = bench_ticker
+            
+            # 4. Bereken RRG
+            rrg_stocks = calculate_rrg_extended(df_stocks, bench_ticker)
+            
+            if not rrg_stocks.empty:
+                # Cleaning voor plotten
+                rrg_stocks = rrg_stocks.dropna(subset=['RS-Ratio', 'RS-Momentum', 'Distance', 'Kwadrant'])
+                rrg_stocks = rrg_stocks[rrg_stocks['Distance'] > 0]
+                
+                # Sla op voor Tab 4
+                st.session_state['rrg_stocks_data'] = rrg_stocks 
+                
+                # --- HIER GING HET MIS: DE LAYOUT ---
+                col1, col2 = st.columns([3, 1])
+                
+                with col1:
+                    st.markdown("### 🧭 Relative Rotation Graph")
+                    fig2 = px.scatter(rrg_stocks, x="RS-Ratio", y="RS-Momentum", 
+                                      color="Kwadrant", text="Ticker", size="Distance",
+                                      color_discrete_map=COLOR_MAP, height=650,
+                                      hover_data=["Heading", "Power_Heading"],
+                                      title=f"RRG: {current_sec} vs {bench_ticker}")
                     
-                    col1, col2 = st.columns([3, 1])
-                    with col1:
-                        fig2 = px.scatter(rrg_stocks, x="RS-Ratio", y="RS-Momentum", 
-                                          color="Kwadrant", text="Ticker", size="Distance",
-                                          color_discrete_map=COLOR_MAP, height=600,
-                                          hover_data=["Heading", "Power_Heading"])
+                    # Assen en lijnen
+                    fig2.add_hline(y=100, line_dash="dash", line_color="grey")
+                    fig2.add_vline(x=100, line_dash="dash", line_color="grey")
+                    fig2.add_shape(type="rect", x0=100, y0=100, x1=105, y1=105, 
+                                   line=dict(color="RoyalBlue", width=0), fillcolor="rgba(0,0,255,0.1)")
+                    
+                    fig2.update_traces(textposition='top center')
+                    
+                    # BELANGRIJKSTE REGEL: TEKEN DE GRAFIEK
+                    st.plotly_chart(fig2, use_container_width=True)
+
+                with col2:
+                    st.markdown("### 🏆 Leaders")
+                    # Toon lijstje van beste aandelen (North-East corner)
+                    leaders = rrg_stocks[
+                        (rrg_stocks['Kwadrant'] == "1. LEADING") & 
+                        (rrg_stocks['Power_Heading'] == "✅ YES")
+                    ].sort_values('Distance', ascending=False).head(10)
+                    
+                    if not leaders.empty:
+                        st.dataframe(leaders[['Ticker', 'Distance']], hide_index=True)
+                    else:
+                        st.write("Geen sterke leaders gevonden.")
+
+            else:
+                st.warning("⚠️ Wel koersdata, maar onvoldoende historie voor RRG berekening (minimaal 100 dagen nodig).")
+        else:
+            st.error("Kon geen aandelenlijst ophalen (Wikipedia error & Fallback faalde).")
+    else:
+        st.info("👈 Klik in de zijbalk op '🚀 Start Analyse' om te beginnen.")
 # === TAB 4: AI ANALYST ===
 with tab4:
     st.header("🧠 AI-Agent Prompt Generator")
