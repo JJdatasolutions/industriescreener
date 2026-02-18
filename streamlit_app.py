@@ -332,11 +332,15 @@ with tab3:
             
             dl_list = list(set(subset + [bench_ticker]))
             
-            st.info(f"Koersdata ophalen voor {len(dl_list)} aandelen... even geduld.")
-
             # 2. Data ophalen en berekenen
-            df_stocks = get_price_data(dl_list)
-            st.session_state['df_stocks_raw'] = df_stocks 
+            # Check of data al in state zit om dubbel laden te voorkomen
+            if 'df_stocks_raw' not in st.session_state or len(st.session_state['df_stocks_raw'].columns) < len(dl_list):
+                 st.info(f"Koersdata ophalen voor {len(dl_list)} aandelen... even geduld.")
+                 df_stocks = get_price_data(dl_list)
+                 st.session_state['df_stocks_raw'] = df_stocks
+            else:
+                 df_stocks = st.session_state['df_stocks_raw']
+
             st.session_state['bench_ticker_t3'] = bench_ticker
             
             rrg_stocks = calculate_rrg_extended(df_stocks, bench_ticker)
@@ -350,89 +354,109 @@ with tab3:
                 col1, col2 = st.columns([3, 1])
                 
                 with col1:
-                    st.markdown("### 🧭 Relative Rotation Graph (Hittekaart)")
+                    st.markdown("### 🧭 Relative Rotation Graph (Pro)")
                     
-                    # --- NIEUWE GRAFIEK LOGICA ---
+                    # --- NIEUW STIJLVOL DESIGN ---
                     
-                    # We gebruiken 'Heading' voor de kleur van de punten
-                    # We gebruiken een custom colorscale: Rood (0-90) -> Blauw -> Groen (180-270)
-                    # Omdat Heading 0-360 is, gebruiken we een circulaire schaal (HSV of specifieke Gradient)
+                    # We gebruiken de hoek (Heading) voor de kleur.
+                    # 0-90 (NE) is het 'doel'.
                     
                     fig2 = px.scatter(
                         rrg_stocks, 
                         x="RS-Ratio", 
                         y="RS-Momentum", 
-                        color="Heading",  # De kleur wordt bepaald door de hoek
+                        color="Heading", 
                         text="Ticker", 
                         size="Distance",
-                        # 'hsv' is een regenboog schaal. Rood zit rond 0/360 (Noord), Groen rond 120, Blauw rond 240.
-                        # Dit zorgt ervoor dat NO (0-90) Rood/Oranje is (Power) en ZW (200+) Koel/Groen/Blauw.
-                        color_continuous_scale="hsv", 
-                        height=650,
-                        hover_data=["Power_Heading"],
-                        title=f"RRG: {current_sec} vs {bench_ticker}"
+                        # 'Spectral_r' geeft een mooie verloop van Rood (slecht) naar Blauw/Groen (goed)
+                        color_continuous_scale="Spectral_r", 
+                        height=700,
+                        hover_data=["Kwadrant", "Power_Heading"],
+                        title=f"<b>RRG MOMENTUM: {current_sec}</b> <br><sup>Benchmark: {bench_ticker}</sup>"
                     )
                     
-                    # Zwarte rand om de bolletjes zodat ze opvallen
+                    # STYLING UPDATE: Clean & Pro
                     fig2.update_traces(
-                        marker=dict(line=dict(width=1, color='black'), opacity=1),
-                        textposition='top center'
+                        marker=dict(line=dict(width=1, color='white'), opacity=0.85), # Witte rand voor contrast
+                        textposition='top center',
+                        textfont=dict(size=10, color='darkslategrey')
                     )
                     
-                    # --- ACHTERGROND KLEUREN (KWADRANTEN) ---
-                    # We voegen 4 gekleurde vlakken toe aan de achtergrond
-                    # De ranges (0-100 en 100-200) zijn arbitrair maar dekken meestal de hele plot
-                    
-                    # 1. LEADING (Rechtsboven) - Groenachtig
-                    fig2.add_shape(type="rect", x0=100, y0=100, x1=200, y1=200, 
-                                   fillcolor="rgba(0, 100, 0, 0.1)", line=dict(width=0), layer="below")
-                    
-                    # 2. WEAKENING (Rechtsonder) - Oranjeachtig
-                    fig2.add_shape(type="rect", x0=100, y0=0, x1=200, y1=100, 
-                                   fillcolor="rgba(255, 165, 0, 0.1)", line=dict(width=0), layer="below")
-                    
-                    # 3. LAGGING (Linksonder) - Roodachtig
-                    fig2.add_shape(type="rect", x0=0, y0=0, x1=100, y1=100, 
-                                   fillcolor="rgba(220, 20, 60, 0.1)", line=dict(width=0), layer="below")
-                    
-                    # 4. IMPROVING (Linksboven) - Blauwachtig
-                    fig2.add_shape(type="rect", x0=0, y0=100, x1=100, y1=200, 
-                                   fillcolor="rgba(173, 216, 230, 0.2)", line=dict(width=0), layer="below")
+                    # Layout: Witte achtergrond, geen gridlines die afleiden
+                    fig2.update_layout(
+                        template="plotly_white",
+                        xaxis=dict(showgrid=True, gridcolor='#f0f0f0', zeroline=False), # Heel subtiele grid
+                        yaxis=dict(showgrid=True, gridcolor='#f0f0f0', zeroline=False),
+                        plot_bgcolor='white',
+                        paper_bgcolor='white',
+                        margin=dict(t=60, b=40, l=40, r=40)
+                    )
 
-                    # Assenlijnen (Kruis in het midden)
-                    fig2.add_hline(y=100, line_dash="solid", line_color="black", line_width=1)
-                    fig2.add_vline(x=100, line_dash="solid", line_color="black", line_width=1)
+                    # --- WATERMERKEN (De "Bloomberg" look) ---
+                    # In plaats van gekleurde vlakken, zetten we tekst in de achtergrond
                     
-                    # Fix voor de assen: zorg dat het kruis altijd in het midden staat
-                    # We berekenen de max afwijking zodat 100,100 centert
+                    # Calculate ranges for dynamic placement
+                    x_mid, y_mid = 100, 100
+                    
+                    annotations = [
+                        dict(x=105, y=105, text="LEADING", xref="x", yref="y",
+                             showarrow=False, font=dict(size=40, color="rgba(0, 128, 0, 0.1)")), # Groenig transparant
+                        dict(x=105, y=95, text="WEAKENING", xref="x", yref="y",
+                             showarrow=False, font=dict(size=40, color="rgba(255, 165, 0, 0.1)")), # Oranje transparant
+                        dict(x=95, y=95, text="LAGGING", xref="x", yref="y",
+                             showarrow=False, font=dict(size=40, color="rgba(255, 0, 0, 0.1)")), # Rood transparant
+                        dict(x=95, y=105, text="IMPROVING", xref="x", yref="y",
+                             showarrow=False, font=dict(size=40, color="rgba(0, 0, 255, 0.1)")) # Blauw transparant
+                    ]
+                    
+                    # Het kruis in het midden (De Assen) - Dikker en Zwart
+                    fig2.add_hline(y=100, line_color="black", line_width=1.5)
+                    fig2.add_vline(x=100, line_color="black", line_width=1.5)
+                    
+                    # Plaats de watermerken
+                    # We gebruiken layout.annotations, maar we moeten even checken of ze goed vallen.
+                    # Simpeler: we gebruiken add_annotation in de loop.
+                    # Omdat coördinaten relatief zijn, zetten we ze hard in de 'quadrants'
+                    
+                    # Om te zorgen dat de tekst altijd in het midden van het kwadrant staat,
+                    # gebruiken we paper coordinates (0-1) in plaats van data coordinaten.
+                    fig2.add_annotation(x=0.9, y=0.9, xref="paper", yref="paper", text="LEADING", showarrow=False, font=dict(size=50, color="#E8F5E9"))
+                    fig2.add_annotation(x=0.9, y=0.1, xref="paper", yref="paper", text="WEAKENING", showarrow=False, font=dict(size=50, color="#FFF3E0"))
+                    fig2.add_annotation(x=0.1, y=0.1, xref="paper", yref="paper", text="LAGGING", showarrow=False, font=dict(size=50, color="#FFEBEE"))
+                    fig2.add_annotation(x=0.1, y=0.9, xref="paper", yref="paper", text="IMPROVING", showarrow=False, font=dict(size=50, color="#E3F2FD"))
+
+                    # Zorg dat 100,100 in het midden blijft
                     max_dev = max(abs(rrg_stocks['RS-Ratio']-100).max(), abs(rrg_stocks['RS-Momentum']-100).max()) * 1.1
-                    fig2.update_xaxes(range=[100-max_dev, 100+max_dev], showgrid=False)
-                    fig2.update_yaxes(range=[100-max_dev, 100+max_dev], showgrid=False)
+                    fig2.update_xaxes(range=[100-max_dev, 100+max_dev])
+                    fig2.update_yaxes(range=[100-max_dev, 100+max_dev])
 
                     st.plotly_chart(fig2, use_container_width=True)
 
                 with col2:
-                    st.markdown("### 🏆 Power Headings")
-                    st.caption("Aandelen die met kracht naar Noordoost (Rood/Oranje) bewegen.")
+                    st.markdown("### ⚡ Alpha Picks")
+                    st.markdown("Top movers (Noord-Oost richting)")
+                    
                     # Filter op Power Heading (0-90 graden)
                     leaders = rrg_stocks[
                         (rrg_stocks['Power_Heading'] == "✅ YES")
-                    ].sort_values('Distance', ascending=False).head(15)
+                    ].sort_values('Distance', ascending=False).head(10)
                     
                     if not leaders.empty:
+                        # Mooiere tabel styling
                         st.dataframe(
-                            leaders[['Ticker', 'Heading', 'Distance']].style.background_gradient(subset=['Distance'], cmap='Reds'),
-                            hide_index=True
+                            leaders[['Ticker', 'Heading', 'Distance']].style
+                            .background_gradient(subset=['Distance'], cmap='Blues')
+                            .format({"Heading": "{:.1f}°", "Distance": "{:.2f}"}),
+                            hide_index=True,
+                            use_container_width=True
                         )
                     else:
-                        st.write("Geen sterke leaders gevonden.")
+                        st.info("Geen uitgesproken leaders op dit moment.")
 
             else:
                 st.warning("⚠️ Onvoldoende data voor plot.")
         else:
             st.error("Kon geen aandelenlijst ophalen.")
-    else:
-        st.info("👈 Start de analyse in de zijbalk.")
 # === TAB 4: AI ANALYST ===
 with tab4:
     st.header("🧠 AI-Agent Prompt Generator")
