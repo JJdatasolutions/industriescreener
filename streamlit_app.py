@@ -357,21 +357,23 @@ with tab3:
                 with col1:
                     st.markdown("### 🧭 Relative Rotation Graph")
                     
-                    # --- CUSTOM COLOR SCALE ---
-                    # Logica: 0-90 is Groen (Top = 45). 90 is Geel. 100+ is Rood.
-                    # Plotly scales werken van 0.0 tot 1.0 (over 360 graden)
-                    # 90 graden = 0.25 op de schaal (90/360)
+                    # --- CUSTOM COLOR SCALE (De 'Sweet Spot' Logica) ---
+                    # 0-360 graden gemapt naar 0.0-1.0
+                    # 45 graden = 0.125
+                    # 90 graden = 0.25
                     
                     custom_color_scale = [
-                        (0.00, "#76c893"),  # 0°   : Start Groen
-                        (0.125, "#1a936f"), # 45°  : ABSOLUUT GROEN (Het ideaal)
-                        (0.20, "#d9ed92"),  # 72°  : Lichtgroen/Geel
-                        (0.25, "#ffea00"),  # 90°  : GEEL (De grens/Waarschuwing)
-                        (0.30, "#ff7b00"),  # 108° : ORANJE (Snel fout)
-                        (0.50, "#d00000"),  # 180° : DIEP ROOD (Lagging)
-                        (0.75, "#6a040f"),  # 270° : DONKER ROOD
-                        (0.90, "#ffba08"),  # 324° : Terugkomend (Improving - Oranje/Geel)
-                        (1.00, "#76c893")   # 360° : Terug naar Start Groen
+                        # DEEL 1: DE GROENE ZONE (0 - 90)
+                        (0.00, "#a7f3d0"),  # 0°   : Lichtgroen (Start Leading)
+                        (0.125, "#065f46"), # 45°  : DONKERGROEN (De Sweet Spot - Max Power)
+                        (0.25, "#a7f3d0"),  # 90°  : Lichtgroen (Einde Leading)
+                        
+                        # DEEL 2: DE RODE ZONE (91 - 360)
+                        # We maken een harde overgang direct na 90 (0.25)
+                        (0.2501, "#fca5a5"), # 90.1°: Lichtrood (Start Zwakte)
+                        (0.50, "#dc2626"),   # 180° : Rood
+                        (0.75, "#991b1b"),   # 270° : Donkerder Rood
+                        (1.00, "#450a0a")    # 360° : Zeer Donker Rood/Zwart
                     ]
 
                     fig2 = px.scatter(
@@ -382,21 +384,21 @@ with tab3:
                         text="Ticker", 
                         size="Distance",
                         height=700,
-                        hover_data=["Kwadrant", "Power_Heading"],
-                        title=f"<b>RRG SIGNAL: {current_sec}</b> <br><sup>Groen = Buy Zone (0-90°) | Geel = Warning | Rood = Avoid</sup>"
+                        hover_data=["Kwadrant"],
+                        title=f"<b>RRG SIGNAL: {current_sec}</b> <br><sup>Focus op 45° (Donkergroen) | Vermijd Rood</sup>"
                     )
                     
-                    # TOEPASSEN CUSTOM KLEUREN
+                    # Styling
                     fig2.update_traces(
                         marker=dict(
-                            line=dict(width=1, color='black'), # Zwart randje voor contrast
-                            opacity=0.9
+                            line=dict(width=1, color='black'), 
+                            opacity=0.85
                         ),
                         textposition='top center',
                         textfont=dict(size=10, color='darkslategrey')
                     )
                     
-                    # Forceer de schaal exact van 0 tot 360, anders kloppen de kleuren niet
+                    # Forceer de kleurenkaart exact over 0-360
                     fig2.update_layout(
                         coloraxis_cmin=0,
                         coloraxis_cmax=360,
@@ -404,12 +406,8 @@ with tab3:
                         coloraxis_colorbar=dict(
                             title="Richting",
                             tickvals=[0, 45, 90, 180, 270],
-                            ticktext=["0°", "45° (MAX)", "90° (⚠️)", "180°", "270°"]
-                        )
-                    )
-
-                    # --- PRO DESIGN (Minimalistisch) ---
-                    fig2.update_layout(
+                            ticktext=["Start", "45° TOP", "90° Grens", "180°", "270°"]
+                        ),
                         template="plotly_white",
                         xaxis=dict(showgrid=True, gridcolor='#f2f2f2', zeroline=False), 
                         yaxis=dict(showgrid=True, gridcolor='#f2f2f2', zeroline=False),
@@ -422,9 +420,9 @@ with tab3:
                     fig2.add_hline(y=100, line_color="black", line_width=1)
                     fig2.add_vline(x=100, line_color="black", line_width=1)
                     
-                    # Subtiele Watermerken
-                    fig2.add_annotation(x=0.95, y=0.95, xref="paper", yref="paper", text="LEADING", showarrow=False, font=dict(size=20, color="rgba(0,128,0,0.1)"))
-                    fig2.add_annotation(x=0.05, y=0.05, xref="paper", yref="paper", text="LAGGING", showarrow=False, font=dict(size=20, color="rgba(255,0,0,0.1)"))
+                    # Visuele hulpmiddelen
+                    fig2.add_annotation(x=102, y=102, text="BUY ZONE", showarrow=False, font=dict(size=14, color="#065f46"))
+                    fig2.add_annotation(x=98, y=98, text="AVOID", showarrow=False, font=dict(size=14, color="#991b1b"))
 
                     # Centreren
                     max_dev = max(abs(rrg_stocks['RS-Ratio']-100).max(), abs(rrg_stocks['RS-Momentum']-100).max()) * 1.1
@@ -434,33 +432,35 @@ with tab3:
                     st.plotly_chart(fig2, use_container_width=True)
 
                 with col2:
-                    st.markdown("### 🚦 Signal List")
+                    st.markdown("### 🎯 Focus List")
+                    st.caption("Top Picks (Dichtst bij 45°)")
                     
-                    # We maken een visuele lijst die matcht met de grafiek
-                    # Sorteren: Eerst de 'Groene' (Power Heading), dan gesorteerd op Distance
+                    # We maken een custom sortering:
+                    # We willen aandelen die het dichtst bij 45 graden zitten bovenaan.
+                    # Dus we berekenen de absolute afwijking van 45.
                     
-                    # Functie om achtergrondkleur te bepalen voor de tabel
-                    def color_heading(val):
-                        # Simpele versie van de kleurenmap voor de tabel
-                        if 0 <= val <= 90:
-                            return 'background-color: #d1e7dd; color: #0f5132;' # Groenig
-                        elif 270 <= val <= 360:
-                             return 'background-color: #fff3cd; color: #664d03;' # Geelig (Improving)
-                        else:
-                            return 'background-color: #f8d7da; color: #842029;' # Rodig
+                    df_view = rrg_stocks.copy()
+                    df_view['Afwijking_45'] = abs(df_view['Heading'] - 45)
                     
-                    # Tabel data
-                    df_view = rrg_stocks[['Ticker', 'Heading', 'Distance']].copy()
-                    df_view = df_view.sort_values('Distance', ascending=False) # Sterkste bovenaan
+                    # Filter: Alleen de groene zone (0-90) in de tabel tonen? 
+                    # Of alles tonen maar sorteren op 'beste'?
+                    # Laten we de top 15 tonen die het dichtst bij 45 graden zitten (en >0 heading).
                     
-                    st.dataframe(
-                        df_view.style
-                        .map(color_heading, subset=['Heading'])
-                        .format({"Heading": "{:.0f}°", "Distance": "{:.2f}"}),
-                        hide_index=True,
-                        use_container_width=True,
-                        height=600
-                    )
+                    top_picks = df_view[
+                        (df_view['Heading'] >= 0) & (df_view['Heading'] <= 90)
+                    ].sort_values('Afwijking_45', ascending=True).head(15)
+                    
+                    if not top_picks.empty:
+                        st.dataframe(
+                            top_picks[['Ticker', 'Heading', 'Distance']].style
+                            .background_gradient(subset=['Heading'], cmap='Greens') # Simpele groen tint voor tabel
+                            .format({"Heading": "{:.1f}°", "Distance": "{:.2f}"}),
+                            hide_index=True,
+                            use_container_width=True,
+                            height=600
+                        )
+                    else:
+                        st.write("Geen aandelen in de Buy Zone (0-90°).")
 
             else:
                 st.warning("⚠️ Onvoldoende data voor plot.")
