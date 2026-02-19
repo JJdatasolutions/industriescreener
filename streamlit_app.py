@@ -467,155 +467,198 @@ with tab2:
 # === TAB 3: AANDELEN ===
 with tab3:
     if st.session_state.get('active'):
+
         current_sec = st.session_state.get('sector_sel', 'Alle Sectoren')
         st.subheader(f"Deep Dive: {current_sec}")
-        
-        bench_ticker = US_SECTOR_MAP.get(current_sec, market_cfg['benchmark']) if "USA" in st.session_state['market_key'] and current_sec != "Alle Sectoren" else market_cfg['benchmark']
+
+        bench_ticker = (
+            US_SECTOR_MAP.get(current_sec, market_cfg['benchmark'])
+            if "USA" in st.session_state['market_key'] and current_sec != "Alle Sectoren"
+            else market_cfg['benchmark']
+        )
+
         constituents = get_market_constituents(st.session_state['market_key'])
-        
-        if not constituents.empty:
-            if current_sec != "Alle Sectoren":
-                subset = constituents[constituents['Sector'] == current_sec]['Ticker'].tolist()
-            else:
-                subset = constituents['Ticker'].head(60).tolist()
-            
-            dl_list = list(set(subset + [bench_ticker]))
-            
-            if 'df_stocks_raw' not in st.session_state or len(st.session_state['df_stocks_raw'].columns) < len(dl_list):
-                 with st.spinner(f"Koersdata ophalen voor {len(dl_list)} aandelen..."):
-                    if use_historical:
-                        df_stocks = get_price_data(dl_list, end_date=str(selected_date))
-                    else:
-                        df_stocks = get_price_data(dl_list)
-                     st.session_state['df_stocks_raw'] = df_stocks
-            else:
-                 df_stocks = st.session_state['df_stocks_raw']
-            
-            # BEREKEN MET NIEUWE LOGICA
-            rrg_stocks = calculate_rrg_extended(df_stocks, bench_ticker, market_bullish=market_bull_flag)
+
+        if constituents.empty:
+            st.error("Kon geen aandelenlijst ophalen.")
+            st.stop()
+
+        # --------------------------
+        # Selecteer subset tickers
+        # --------------------------
+        if current_sec != "Alle Sectoren":
+            subset = constituents[constituents['Sector'] == current_sec]['Ticker'].tolist()
+        else:
+            subset = constituents['Ticker'].head(60).tolist()
+
+        dl_list = list(set(subset + [bench_ticker]))
+
+        # --------------------------
+        # Data ophalen (historisch of live)
+        # --------------------------
+        with st.spinner(f"Koersdata ophalen voor {len(dl_list)} aandelen..."):
+
             if use_historical:
-    st.markdown("### 📈 Forward Performance sinds gekozen datum")
+                df_stocks = get_price_data(dl_list, end_date=str(selected_date))
+            else:
+                df_stocks = get_price_data(dl_list)
 
-    future_df = get_price_data(
-        rrg_stocks['Ticker'].tolist(),
-        end_date=None
-    )
+        if df_stocks.empty:
+            st.warning("Onvoldoende koersdata.")
+            st.stop()
 
-    if not future_df.empty:
-        perf_data = []
+        # --------------------------
+        # RRG berekenen
+        # --------------------------
+        rrg_stocks = calculate_rrg_extended(
+            df_stocks,
+            bench_ticker,
+            market_bullish=market_bull_flag
+        )
 
-        for ticker in rrg_stocks['Ticker']:
-            try:
-                price_then = df_stocks[ticker].iloc[-1]
-                price_now = future_df[ticker].iloc[-1]
+        if rrg_stocks.empty:
+            st.warning("Onvoldoende data voor RRG.")
+            st.stop()
 
-                return_pct = ((price_now / price_then) - 1) * 100
+        rrg_stocks = rrg_stocks.dropna(
+            subset=['RS-Ratio', 'RS-Momentum', 'Alpha_Score']
+        )
+        rrg_stocks = rrg_stocks[rrg_stocks['Distance'] > 0]
 
-                perf_data.append({
-                    "Ticker": ticker,
-                    "Alpha_Score": rrg_stocks.loc[
-                        rrg_stocks['Ticker'] == ticker,
-                        'Alpha_Score'
-                    ].values[0],
-                    "Return_since_date (%)": return_pct
-                })
+        st.session_state['rrg_stocks_data'] = rrg_stocks
 
-            except:
-                continue
+        # ================================
+        # VISUALISATIE
+        # ================================
+        col1, col2 = st.columns([3, 1])
 
-        perf_df = pd.DataFrame(perf_data)
+        with col1:
 
-        if not perf_df.empty:
-            corr = perf_df["Alpha_Score"].corr(perf_df["Return_since_date (%)"])
+            custom_color_scale = [
+                (0.00, "#e5e7eb"),
+                (0.125, "#00ff00"),
+                (0.25, "#10b981"),
+                (0.26, "#fca5a5"),
+                (1.00, "#450a0a")
+            ]
 
-            st.metric("📊 Correlatie Alpha vs Return", f"{corr:.2f}")
-
-            fig_perf = px.scatter(
-                perf_df,
-                x="Alpha_Score",
-                y="Return_since_date (%)",
+            fig2 = px.scatter(
+                rrg_stocks,
+                x="RS-Ratio",
+                y="RS-Momentum",
+                color="Heading",
                 text="Ticker",
-                title="Alpha Score vs Forward Return"
+                size="Alpha_Score",
+                height=700,
+                hover_data=["Kwadrant", "Action", "Distance"],
+                title=f"<b>RRG SIGNAL: {current_sec}</b>"
             )
 
-            st.plotly_chart(fig_perf, use_container_width=True)
-
-            st.dataframe(
-                perf_df.sort_values("Return_since_date (%)", ascending=False),
-                use_container_width=True
+            fig2.update_traces(
+                marker=dict(line=dict(width=1, color='black'), opacity=0.85),
+                textposition='top center'
             )
-            if not rrg_stocks.empty:
-                rrg_stocks = rrg_stocks.dropna(subset=['RS-Ratio', 'RS-Momentum', 'Alpha_Score'])
-                rrg_stocks = rrg_stocks[rrg_stocks['Distance'] > 0]
-                st.session_state['rrg_stocks_data'] = rrg_stocks 
-                
-                col1, col2 = st.columns([3, 1])
-                
-                with col1:
-                    custom_color_scale = [
-                        (0.00, "#e5e7eb"), (0.125, "#00ff00"), (0.25, "#10b981"), 
-                        (0.26, "#fca5a5"), (1.00, "#450a0a")
-                    ]
 
-                    fig2 = px.scatter(
-                        rrg_stocks, 
-                        x="RS-Ratio", 
-                        y="RS-Momentum", 
-                        color="Heading", 
-                        text="Ticker", 
-                        size="Alpha_Score", # Hier zien we direct de winnaars
-                        height=700,
-                        hover_data=["Kwadrant", "Action", "Distance"],
-                        title=f"<b>RRG SIGNAL: {current_sec}</b>"
+            fig2.update_layout(
+                coloraxis_cmin=0,
+                coloraxis_cmax=360,
+                coloraxis_colorscale=custom_color_scale,
+                template="plotly_white"
+            )
+
+            fig2.add_hline(y=100)
+            fig2.add_vline(x=100)
+
+            max_dev = max(
+                abs(rrg_stocks['RS-Ratio'] - 100).max(),
+                abs(rrg_stocks['RS-Momentum'] - 100).max()
+            ) * 1.1
+
+            fig2.update_xaxes(range=[100 - max_dev, 100 + max_dev])
+            fig2.update_yaxes(range=[100 - max_dev, 100 + max_dev])
+
+            st.plotly_chart(fig2, use_container_width=True)
+
+        # ================================
+        # ALPHA PICKS + FORWARD VALIDATIE
+        # ================================
+        with col2:
+
+            st.markdown("### 🎯 Alpha Picks")
+
+            top_picks = rrg_stocks[
+                rrg_stocks['Action'].str.contains("BUY|SPEC")
+            ].sort_values("Alpha_Score", ascending=False).head(15)
+
+            if top_picks.empty:
+                st.info("Geen sterke BUY signalen gevonden.")
+            else:
+                st.dataframe(
+                    top_picks[['Ticker', 'Alpha_Score', 'Action']]
+                    .style.background_gradient(
+                        subset=['Alpha_Score'],
+                        cmap='Greens'
                     )
-                    
-                    fig2.update_traces(
-                        marker=dict(line=dict(width=1, color='black'), opacity=0.85),
-                        textposition='top center',
-                        textfont=dict(size=10, color='darkslategrey')
-                    )
-                    
-                    fig2.update_layout(
-                        coloraxis_cmin=0, coloraxis_cmax=360,
-                        coloraxis_colorscale=custom_color_scale,
-                        coloraxis_colorbar=dict(title="Richting", tickvals=[0, 45, 90, 225]),
-                        template="plotly_white",
-                        xaxis=dict(showgrid=True, zeroline=True, zerolinecolor='black'), 
-                        yaxis=dict(showgrid=True, zeroline=True, zerolinecolor='black')
-                    )
+                    .format({"Alpha_Score": "{:.1f}"}),
+                    hide_index=True,
+                    use_container_width=True,
+                    height=450
+                )
 
-                    fig2.add_hline(y=100, line_color="black", line_width=1)
-                    fig2.add_vline(x=100, line_color="black", line_width=1)
-                    
-                    max_dev = max(abs(rrg_stocks['RS-Ratio']-100).max(), abs(rrg_stocks['RS-Momentum']-100).max()) * 1.1
-                    fig2.update_xaxes(range=[100-max_dev, 100+max_dev])
-                    fig2.update_yaxes(range=[100-max_dev, 100+max_dev])
+        # =====================================================
+        # 📈 FORWARD PERFORMANCE (ALLEEN IN HISTORISCHE MODE)
+        # =====================================================
+        if use_historical:
 
-                    st.plotly_chart(fig2, use_container_width=True)
+            st.markdown("---")
+            st.markdown("## 📈 Forward Performance Analyse")
 
-                with col2:
-                    st.markdown("### 🎯 Alpha Picks")
-                    st.caption("Sortering: Alpha Score (Heading + Distance)")
-                    
-                    # Filter op BUY signalen
-                    top_picks = rrg_stocks[rrg_stocks['Action'].str.contains("BUY") | rrg_stocks['Action'].str.contains("SPEC")]
-                    top_picks = top_picks.sort_values('Alpha_Score', ascending=False).head(15)
-                    
-                    if not top_picks.empty:
-                        st.dataframe(
-                            top_picks[['Ticker', 'Alpha_Score', 'Action']].style
-                            .background_gradient(subset=['Alpha_Score'], cmap='Greens')
-                            .format({"Alpha_Score": "{:.1f}"}),
-                            hide_index=True,
-                            use_container_width=True,
-                            height=600
-                        )
-                    else:
-                        st.info("Geen sterke BUY signalen gevonden in huidige markt.")
+            future_df = get_price_data(rrg_stocks['Ticker'].tolist())
 
-            else: st.warning("Onvoldoende data.")
-        else: st.error("Kon geen aandelenlijst ophalen.")
+            perf_data = []
 
+            for ticker in rrg_stocks['Ticker']:
+                try:
+                    price_then = df_stocks[ticker].iloc[-1]
+                    price_now = future_df[ticker].iloc[-1]
+                    return_pct = ((price_now / price_then) - 1) * 100
+
+                    perf_data.append({
+                        "Ticker": ticker,
+                        "Alpha_Score": rrg_stocks.loc[
+                            rrg_stocks['Ticker'] == ticker,
+                            'Alpha_Score'
+                        ].values[0],
+                        "Return (%)": return_pct
+                    })
+                except:
+                    continue
+
+            perf_df = pd.DataFrame(perf_data)
+
+            if not perf_df.empty:
+
+                correlation = perf_df["Alpha_Score"].corr(perf_df["Return (%)"])
+
+                st.metric(
+                    "📊 Correlatie Alpha vs Return",
+                    f"{correlation:.2f}"
+                )
+
+                fig_perf = px.scatter(
+                    perf_df,
+                    x="Alpha_Score",
+                    y="Return (%)",
+                    text="Ticker",
+                    title="Alpha Score vs Forward Return"
+                )
+
+                st.plotly_chart(fig_perf, use_container_width=True)
+
+                st.dataframe(
+                    perf_df.sort_values("Return (%)", ascending=False),
+                    use_container_width=True
+                )
 # === TAB 4: AI ANALYST ===
 with tab4:
     st.header("🧠 Quant AI Prompt")
