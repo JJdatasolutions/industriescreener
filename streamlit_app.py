@@ -102,27 +102,41 @@ def get_market_constituents(market_key):
         return pd.DataFrame(list(fallback_data.items()), columns=['Ticker', 'Sector'])
 
 @st.cache_data(ttl=3600)
-def get_price_data(tickers):
-    if not tickers: return pd.DataFrame()
+def get_price_data(tickers, end_date=None):
+    if not tickers:
+        return pd.DataFrame()
+
     try:
-        # Download data, auto_adjust True voor split/div
-        data = yf.download(tickers, period="2y", progress=False, auto_adjust=True)
-        
-        # Flexibele kolom afhandeling voor yfinance updates
+        if end_date:
+            data = yf.download(
+                tickers,
+                start="2024-01-01",  # ruim genoeg historisch
+                end=end_date,
+                progress=False,
+                auto_adjust=True
+            )
+        else:
+            data = yf.download(
+                tickers,
+                period="2y",
+                progress=False,
+                auto_adjust=True
+            )
+
         if isinstance(data.columns, pd.MultiIndex):
-            if 'Close' in data.columns.get_level_values(0): data = data['Close']
-            elif 'Close' in data.columns.get_level_values(1): data = data.xs('Close', level=1, axis=1)
-            else: 
-                # Als structuur onbekend is, probeer te flattenen
-                if data.shape[1] == len(tickers):
-                     data = data.droplevel(1, axis=1) if data.columns.nlevels > 1 else data
+            if 'Close' in data.columns.get_level_values(0):
+                data = data['Close']
+            elif 'Close' in data.columns.get_level_values(1):
+                data = data.xs('Close', level=1, axis=1)
 
         if isinstance(data, pd.Series):
             data = data.to_frame()
             data.columns = tickers
-            
+
         return data
-    except: return pd.DataFrame()
+
+    except:
+        return pd.DataFrame()
 
 def calculate_rrg_extended(df, benchmark_ticker, market_bullish=True):
     """
@@ -243,6 +257,22 @@ st.sidebar.header("⚙️ Instellingen")
 sel_market_key = st.sidebar.selectbox("Kies Markt", list(MARKETS.keys()))
 market_cfg = MARKETS[sel_market_key]
 
+from datetime import datetime
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("📅 Historische Analyse")
+
+min_date = datetime(2026, 1, 1)
+max_date = datetime.today()
+
+selected_date = st.sidebar.date_input(
+    "Bekijk situatie op datum:",
+    value=max_date,
+    min_value=min_date,
+    max_value=max_date
+)
+
+use_historical = selected_date < max_date.date()
 # Check of we in de USA zitten voor sector map, anders standaard
 sector_list = ["Alle Sectoren"]
 if "USA" in sel_market_key:
@@ -453,14 +483,67 @@ with tab3:
             
             if 'df_stocks_raw' not in st.session_state or len(st.session_state['df_stocks_raw'].columns) < len(dl_list):
                  with st.spinner(f"Koersdata ophalen voor {len(dl_list)} aandelen..."):
-                     df_stocks = get_price_data(dl_list)
+                    if use_historical:
+                        df_stocks = get_price_data(dl_list, end_date=str(selected_date))
+                    else:
+                        df_stocks = get_price_data(dl_list)
                      st.session_state['df_stocks_raw'] = df_stocks
             else:
                  df_stocks = st.session_state['df_stocks_raw']
             
             # BEREKEN MET NIEUWE LOGICA
             rrg_stocks = calculate_rrg_extended(df_stocks, bench_ticker, market_bullish=market_bull_flag)
-            
+            if use_historical:
+    st.markdown("### 📈 Forward Performance sinds gekozen datum")
+
+    future_df = get_price_data(
+        rrg_stocks['Ticker'].tolist(),
+        end_date=None
+    )
+
+    if not future_df.empty:
+        perf_data = []
+
+        for ticker in rrg_stocks['Ticker']:
+            try:
+                price_then = df_stocks[ticker].iloc[-1]
+                price_now = future_df[ticker].iloc[-1]
+
+                return_pct = ((price_now / price_then) - 1) * 100
+
+                perf_data.append({
+                    "Ticker": ticker,
+                    "Alpha_Score": rrg_stocks.loc[
+                        rrg_stocks['Ticker'] == ticker,
+                        'Alpha_Score'
+                    ].values[0],
+                    "Return_since_date (%)": return_pct
+                })
+
+            except:
+                continue
+
+        perf_df = pd.DataFrame(perf_data)
+
+        if not perf_df.empty:
+            corr = perf_df["Alpha_Score"].corr(perf_df["Return_since_date (%)"])
+
+            st.metric("📊 Correlatie Alpha vs Return", f"{corr:.2f}")
+
+            fig_perf = px.scatter(
+                perf_df,
+                x="Alpha_Score",
+                y="Return_since_date (%)",
+                text="Ticker",
+                title="Alpha Score vs Forward Return"
+            )
+
+            st.plotly_chart(fig_perf, use_container_width=True)
+
+            st.dataframe(
+                perf_df.sort_values("Return_since_date (%)", ascending=False),
+                use_container_width=True
+            )
             if not rrg_stocks.empty:
                 rrg_stocks = rrg_stocks.dropna(subset=['RS-Ratio', 'RS-Momentum', 'Alpha_Score'])
                 rrg_stocks = rrg_stocks[rrg_stocks['Distance'] > 0]
