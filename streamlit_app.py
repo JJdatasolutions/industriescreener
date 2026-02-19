@@ -671,10 +671,9 @@ with tab4:
             row = rrg_data[rrg_data['Ticker'] == stock_pick].iloc[0]
             regime = "BULL" if market_bull_flag else "BEAR"
             
-           ai_prompt = f"""
+            ai_prompt = f"""
 Systeem: Je bent een AI Investment Committee Swarm bestaande uit een Quant Strategist, een Fundamenteel Analist en een Risk Manager. 
 Analyseer de asset **{stock_pick}** in een **{regime}** markt-regime.
-
 
 HARD DATA (Mijn RRG Model):
 - **Alpha Score:** {row['Alpha_Score']:.2f} (Schaal 0-10+. Hoger is beter).
@@ -707,6 +706,6 @@ Synthetiseer de inzichten in een definitief advies:
 
 Schrijf in een professionele, beknopte Hedge Fund memo-stijl. Wees kritisch op de data.
 """
-            st.text_area("Prompt:", value=ai_prompt, height=300)
+            st.text_area("Prompt:", value=ai_prompt, height=400)
     else:
         st.warning("Draai eerst Tab 3.")
