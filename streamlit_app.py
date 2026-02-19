@@ -672,7 +672,7 @@ with tab4:
             regime = "BULL" if market_bull_flag else "BEAR"
             
             ai_prompt = f"""
-Handel als een Expert Quantitative Hedge Fund Manager.
+Handel als een Expert Quantitative Hedge Fund Manager die volgende gegevens krijgt maar niet weet waar de data vandaan komen en dit daarom ook factcheckt.
 
 Analyse voor: **{stock_pick}**
 Context: {regime} Markt.
