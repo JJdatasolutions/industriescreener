@@ -672,23 +672,23 @@ with tab4:
             regime = "BULL" if market_bull_flag else "BEAR"
             
             ai_prompt = f"""
-Handel als een Expert Quantitative Hedge Fund Manager die volgende gegevens krijgt maar niet weet waar de data vandaan komen en dit daarom ook factcheckt.
+Handel als een AI-Investment Committee bestaande uit drie experts die dit specifieke signaal voor **{stock_pick}** beoordelen.
 
-Analyse voor: **{stock_pick}**
-Context: {regime} Markt.
+INPUT DATA:
+- Kwadrant: {row['Kwadrant']}
+- Momentum Heading: {row['Heading']:.1f}°
+- Alpha Sterkte: {row['Alpha_Score']:.2f}
+- Markt Regime: {regime}
 
-HARD DATA (Mijn RRG Model):
-- **Alpha Score:** {row['Alpha_Score']:.2f} (Schaal 0-10+. Hoger is beter).
-- **Heading:** {row['Heading']:.1f}° (Target = 45°).
-- **Actie Signaal:** {row['Action']}
-- **Afstand tot Benchmark:** {row['Distance']:.2f}
-- **Positie:** {row['Kwadrant']}
+DE SWARM OVERLEGT:
 
-OPDRACHT:
-1. Valideer dit kwantitatieve 'BUY' of 'AVOID' signaal met fundamentele data.
-2. Wat is de primaire katalysator voor deze sector rotatie?
-3. Geef concrete entry/exit levels o.b.v. volatiliteit.
-            """
+- **De Quant (De wiskundige):** Analyseert de RRG-statistieken. Is de Alpha Score stabiel? Wat zegt de afstand van {row['Distance']:.2f} over de overbought/oversold status t.o.v. de benchmark?
+- **De Fundamentele Analist (De criticus):** Zoekt naar de 'waarom'. Is er sprake van sector-rotatie? Welke nieuws-events (earnings, macro) beïnvloeden {stock_pick} op dit moment?
+- **De Risk Manager (De bewaker):** Berekent de optimale entry en exit. Formuleer een trade-plan met een duidelijke risk-to-reward ratio.
+
+CONCLUSIE:
+Eindig met een gezamenlijk eindoordeel: Sterk Kopen, Speculatief Kopen, Houden, of Vermijden.
+"""
             st.text_area("Prompt:", value=ai_prompt, height=300)
     else:
         st.warning("Draai eerst Tab 3.")
