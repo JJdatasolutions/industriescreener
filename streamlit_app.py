@@ -671,14 +671,17 @@ with tab4:
             row = rrg_data[rrg_data['Ticker'] == stock_pick].iloc[0]
             regime = "BULL" if market_bull_flag else "BEAR"
             
-            ai_prompt = f"""
-Handel als een AI-Investment Committee bestaande uit drie experts die dit specifieke signaal voor **{stock_pick}** beoordelen.
+           ai_prompt = f"""
+Systeem: Je bent een AI Investment Committee Swarm bestaande uit een Quant Strategist, een Fundamenteel Analist en een Risk Manager. 
+Analyseer de asset **{stock_pick}** in een **{regime}** markt-regime.
 
-INPUT DATA:
-- Kwadrant: {row['Kwadrant']}
-- Momentum Heading: {row['Heading']:.1f}°
-- Alpha Sterkte: {row['Alpha_Score']:.2f}
-- Markt Regime: {regime}
+
+HARD DATA (Mijn RRG Model):
+- **Alpha Score:** {row['Alpha_Score']:.2f} (Schaal 0-10+. Hoger is beter).
+- **Heading:** {row['Heading']:.1f}° (Target = 45°).
+- **Actie Signaal:** {row['Action']}
+- **Afstand tot Benchmark:** {row['Distance']:.2f}
+- **Positie:** {row['Kwadrant']}
 
 DE SWARM OVERLEGT:
 
@@ -686,8 +689,23 @@ DE SWARM OVERLEGT:
 - **De Fundamentele Analist (De criticus):** Zoekt naar de 'waarom'. Is er sprake van sector-rotatie? Welke nieuws-events (earnings, macro) beïnvloeden {stock_pick} op dit moment?
 - **De Risk Manager (De bewaker):** Berekent de optimale entry en exit. Formuleer een trade-plan met een duidelijke risk-to-reward ratio.
 
-CONCLUSIE:
-Eindig met een gezamenlijk eindoordeel: Sterk Kopen, Speculatief Kopen, Houden, of Vermijden.
+JULLIE OPDRACHT:
+
+1. QUANT AUDIT (De Quant):
+Evalueer de vector-kwaliteit. Is een Heading van {row['Heading']:.1f}° een teken van duurzame versnelling of naderende uitputting? Interpreteer de afstand ({row['Distance']:.2f}) t.o.v. de benchmark (over-extended of beginnende trend?).
+
+2. FUNDAMENTELE VALIDATIE (De Analist):
+Valideer het '{row['Action']}' signaal. Zoek naar de primaire katalysator voor deze sector-rotatie (bijv. rentegevoeligheid, earnings season, macro-cijfers). Waarom stroomt er specifiek NU kapitaal naar of uit {stock_pick}?
+
+3. RISK & VOLATILITY (De Risk Manager):
+Geef concrete entry- en exit-levels. Gebruik de huidige marktvolatiliteit om een logische Stop-Loss en een 'Take Profit' target te bepalen die past bij de huidige Alpha Score.
+
+4. HET OORDEEL (De Consensus):
+Synthetiseer de inzichten in een definitief advies: 
+- [STERK KOPEN | SPECULATIEF KOPEN | HOUDEN | VERMIJDEN]
+- Geef een korte 'Conviction Score' (1-10) en de belangrijkste reden voor dit cijfer.
+
+Schrijf in een professionele, beknopte Hedge Fund memo-stijl. Wees kritisch op de data.
 """
             st.text_area("Prompt:", value=ai_prompt, height=300)
     else:
