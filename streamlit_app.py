@@ -694,7 +694,7 @@ JULLIE OPDRACHT:
 Evalueer de vector-kwaliteit. Is een Heading van {row['Heading']:.1f}° een teken van duurzame versnelling of naderende uitputting? Interpreteer de afstand ({row['Distance']:.2f}) t.o.v. de benchmark (over-extended of beginnende trend?).
 
 2. FUNDAMENTELE VALIDATIE (De Analist):
-Valideer het '{row['Action']}' signaal. Zoek naar de primaire katalysator voor deze sector-rotatie (bijv. rentegevoeligheid, earnings season, macro-cijfers). Waarom stroomt er specifiek NU kapitaal naar of uit {stock_pick}?
+Valideer het '{row['Action']}' signaal. Wees sceptisch tegenover de data. Zoek naar de primaire katalysator voor deze sector-rotatie (bijv. rentegevoeligheid, earnings season, macro-cijfers). Waarom stroomt er specifiek NU kapitaal naar of uit {stock_pick}?
 
 3. RISK & VOLATILITY (De Risk Manager):
 Geef concrete entry- en exit-levels. Gebruik de huidige marktvolatiliteit om een logische Stop-Loss en een 'Take Profit' target te bepalen die past bij de huidige Alpha Score.
