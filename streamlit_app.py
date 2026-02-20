@@ -5,6 +5,12 @@ import plotly.express as px
 import numpy as np
 import requests
 import math
+import scipy.linalg as la
+from statsmodels.tsa.stattools import adfuller
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score
+import warnings
+warnings.filterwarnings("ignore") # Onderdruk waarschuwingen voor stationariteit tests
 
 # --- CONFIGURATIE ---
 st.set_page_config(page_title="Pro Market Screener 7.5 (Scientific RRG)", layout="wide", page_icon="🧠")
@@ -138,87 +144,163 @@ def get_price_data(tickers, end_date=None):
     except:
         return pd.DataFrame()
 
-def calculate_rrg_extended(df, benchmark_ticker, market_bullish=True):
+# --- HELPER FUNCTIES VOOR INSTITUTIONELE ALPHA ---
+
+def denoise_covariance(returns, q, variance=1):
     """
-    RRG v7.5 - Scientific Implementation
-    Inclusief: Alpha Score, Market Regime Filter & Heading Sweet Spot (45deg)
+    Marcenko-Pastur Denoising van de Covariantiematrix (López de Prado).
+    q = T/N (Aantal waarnemingen / Aantal variabelen)
+    """
+    if returns.empty or returns.shape[1] < 2:
+        return returns.cov()
+        
+    cov_matrix = returns.cov().values
+    
+    # Bereken eigenwaarden en eigenvectoren
+    eigenvalues, eigenvectors = la.eigh(cov_matrix)
+    
+    # Marcenko-Pastur theorethische maximale eigenwaarde
+    e_max = variance * (1 + (1/q)**0.5)**2
+    
+    # Denoise: Zet eigenwaarden onder e_max op de gemiddelde waarde om variantie te behouden
+    eigenvalues_denoised = eigenvalues.copy()
+    noise_indices = eigenvalues < e_max
+    if noise_indices.any():
+        eigenvalues_denoised[noise_indices] = eigenvalues[noise_indices].mean()
+        
+    # Reconstructie van de gezuiverde covariantiematrix
+    cov_denoised = eigenvectors @ np.diag(eigenvalues_denoised) @ la.inv(eigenvectors)
+    return pd.DataFrame(cov_denoised, index=returns.columns, columns=returns.columns)
+
+def check_stationarity(series):
+    """
+    Augmented Dickey-Fuller test.
+    Retouren: True als stationair (p-value < 0.05), anders False (Random Walk).
+    """
+    try:
+        # Drop NaNs en controleer of er genoeg data is
+        clean_series = series.dropna()
+        if len(clean_series) < 30: 
+            return False
+            
+        result = adfuller(clean_series)
+        return result[1] < 0.05 # p-value < 5% betekent we verwerpen de null-hypothese (het is stationair)
+    except:
+        return False
+
+def train_meta_labeler(features, labels):
+    """
+    Traing een Random Forest Classifier om de 'Probability of Success' te berekenen.
+    """
+    if len(features) < 50: # Te weinig data voor ML
+        return 0.5
+        
+    clf = RandomForestClassifier(n_estimators=50, max_depth=3, random_state=42)
+    clf.fit(features, labels)
+    # Return de kansklasse 1 (succes)
+    return clf.predict_proba(features.iloc[-1:])[-1][1]
+
+
+# --- HOOFD FUNCTIE ---
+
+def calculate_rrg_extended_institutional(df, benchmark_ticker, market_bullish=True):
+    """
+    RRG v8.0 - López de Prado Institutional Alpha
+    Inclusief: MP Denoising, Volatility Adjustments, ADF Stationarity & Meta-Labeling
     """
     if df.empty or benchmark_ticker not in df.columns: return pd.DataFrame()
     
     rrg_data = []
     bench_series = df[benchmark_ticker]
     
+    # 1. Marcenko-Pastur Denoising Matrix voorbereiden
+    returns = df.pct_change().dropna()
+    q = returns.shape[0] / returns.shape[1] if returns.shape[1] > 0 else 1
+    denoised_cov = denoise_covariance(returns, q)
+    
     for ticker in df.columns:
         if ticker == benchmark_ticker: continue
         try:
-            # RRG Basis
-            rs = df[ticker] / bench_series
-            rs_ma = rs.rolling(100).mean() # JdK Standaard
+            # Basis data
+            asset_series = df[ticker]
+            rs = asset_series / bench_series
+            rs_ma = rs.rolling(100).mean()
             rs_ratio = 100 * (rs / rs_ma)
-            rs_mom = 100 * (rs_ratio / rs_ratio.shift(10)) # Momentum van de Ratio
+            rs_mom = 100 * (rs_ratio / rs_ratio.shift(10))
             
-            if len(rs_ratio) < 2: continue
+            if len(rs_ratio) < 20: continue
             
-            curr_r = rs_ratio.iloc[-1]
-            curr_m = rs_mom.iloc[-1]
-            prev_r = rs_ratio.iloc[-2]
-            prev_m = rs_mom.iloc[-2]
+            curr_r, curr_m = rs_ratio.iloc[-1], rs_mom.iloc[-1]
+            prev_r, prev_m = rs_ratio.iloc[-2], rs_mom.iloc[-2]
             
-            # 1. Distance (Euclidisch vanaf 100,100)
-            # Dient als 'hefboom': hoe verder weg, hoe krachtiger het signaal
+            # 2. Risk-Adjustment via Denoised Covariance
+            # Haal de specifieke variantie van dit aandeel uit de gezuiverde matrix
+            asset_vol = np.sqrt(denoised_cov.loc[ticker, ticker]) * np.sqrt(252) 
+            vol_penalty = max(0.5, 1 - asset_vol) # Simpele reductie voor extreme volatiliteit
+            
+            # 3. Stationarity Check (ADF) op de Relative Strength ratio
+            is_stationary = check_stationarity(rs_ratio.tail(100))
+            stationarity_multiplier = 1.0 if is_stationary else 0.3 # Zware penalty voor random walks
+            
+            # Basis RRG Vectoren
             dist = np.sqrt((curr_r - 100)**2 + (curr_m - 100)**2)
+            dx, dy = curr_r - prev_r, curr_m - prev_m
+            heading_deg = math.degrees(math.atan2(dy, dx)) % 360
             
-            # 2. Heading (Hoek van de beweging t.o.v. t-1)
-            dx = curr_r - prev_r
-            dy = curr_m - prev_m
-            
-            if dx == 0 and dy == 0:
-                heading_deg = 0
-            else:
-                heading_rad = math.atan2(dy, dx)
-                heading_deg = math.degrees(heading_rad)
-                if heading_deg < 0: heading_deg += 360
-            
-            # 3. ALPHA SCORE CALCULATION (Nieuw in v7.5)
-            # Sweet spot is 45 graden.
-            # We berekenen hoe dicht de heading bij 45 ligt.
-            # 0 graden afwijking = Score 1.0
-            # 180 graden afwijking = Score 0.0
-            
+            # Heading Quality (Sweet spot 45 deg)
             deviation = abs(heading_deg - 45)
-            if deviation > 180: deviation = 360 - deviation # Kortste pad op cirkel
+            if deviation > 180: deviation = 360 - deviation
+            heading_quality = max(0, 1 - (deviation / 135))
             
-            # Normaliseer tussen 0 en 1 (waarbij 1 = exact 45 graden)
-            heading_quality = max(0, 1 - (deviation / 135)) # 135 graden speling (dus tot 180 of -90 is 0)
+            # Multi-Factor benadering (Proxies tbv API limieten)
+            # Factor 1: Value Reversal Proxy (Afstand tot 252-dagen high)
+            max_52w = asset_series.tail(252).max()
+            drawdown = (asset_series.iloc[-1] / max_52w) - 1
+            value_factor = abs(drawdown) if drawdown < -0.2 else 0 # Bonus als het 20%+ is gedaald
             
-            # De Alpha Score is Kwaliteit van de richting * Kracht van de positie (Distance)
-            alpha_score = dist * heading_quality
+            # Factor 2: Momentum (Prijs)
+            mom_factor = (asset_series.iloc[-1] / asset_series.iloc[-20]) - 1
+            
+            # Ruwe Alpha Score met Factoren en Denoised Volatility
+            raw_alpha = (dist * heading_quality * vol_penalty) + (value_factor * 10) + (mom_factor * 10)
+            raw_alpha = raw_alpha * stationarity_multiplier
 
-            # 4. ACTION LOGIC (Scientific Rules)
-            # Baseer actie op Heading + Kwadrant + Market Regime
-            action = "HOLD/WATCH"
+            # 4. Meta-Labeling (Probability of Success)
+            # Let op: in een echte productie-omgeving train je dit model OFFLINE. 
+            # Hier gebruiken we een on-the-fly proxy classifier voor demonstratie.
             
-            # Regels:
-            # A. SOUTH-WEST RULE: Heading tussen 180-270 is ALTIJD Sell/Avoid
+            # Maak een simpele dataset van de afgelopen 100 dagen
+            ml_data = pd.DataFrame({
+                'RS_Ratio': rs_ratio.tail(100),
+                'RS_Mom': rs_mom.tail(100),
+                'Vol': returns[ticker].tail(100).rolling(10).std()
+            }).dropna()
+            
+            # Label: Ging het aandeel in de 5 dagen DAARNA omhoog vs de benchmark?
+            future_outperformance = (returns[ticker].shift(-5) > returns[benchmark_ticker].shift(-5)).tail(len(ml_data))
+            future_outperformance = future_outperformance.astype(int) # 1 = succes, 0 = faal
+            
+            # Align features and labels
+            ml_data = ml_data.iloc[:-5] 
+            future_outperformance = future_outperformance.iloc[:-5]
+            
+            meta_prob_success = train_meta_labeler(ml_data, future_outperformance)
+            
+            # DEFINITIEVE INSTITUTIONELE ALPHA SCORE
+            institutional_alpha = raw_alpha * meta_prob_success
+
+            # Actie logica gebaseerd op waarschijnlijkheid en RRG positie
+            action = "HOLD/WATCH"
             if 180 <= heading_deg <= 275:
                 action = "❌ AVOID"
-            
-            # B. NORTH-EAST RULE: Heading tussen 0-90 is Potentieel Buy
             elif 0 <= heading_deg <= 90:
-                # Filter: Is de beweging krachtig genoeg? (Minimale afstand)
-                if dist > 1.5: 
-                    if market_bullish:
-                        action = "✅ BUY"
-                    else:
-                        # In Bear market alleen kopen als het echt 'Leading' is
-                        if curr_r > 100 and curr_m > 100:
-                            action = "⚠️ SPEC BUY"
-                        else:
-                            action = "👀 WATCH"
+                if institutional_alpha > 2.0 and meta_prob_success > 0.60: 
+                    action = "✅ BUY"
+                elif curr_r > 100 and curr_m > 100:
+                    action = "⚠️ SPEC BUY"
                 else:
-                    action = "💤 FLAT"
+                    action = "👀 WATCH"
 
-            # C. Kwadrant check
             if curr_r > 100 and curr_m > 100: kwadrant = "1. LEADING"
             elif curr_r < 100 and curr_m > 100: kwadrant = "4. IMPROVING"
             elif curr_r < 100 and curr_m < 100: kwadrant = "3. LAGGING"
@@ -231,11 +313,14 @@ def calculate_rrg_extended(df, benchmark_ticker, market_bullish=True):
                 'Kwadrant': kwadrant,
                 'Distance': dist,
                 'Heading': heading_deg,
-                'Alpha_Score': alpha_score,
+                'Alpha_Score': institutional_alpha, # Geüpdatet naar institutionele norm
+                'Meta_Prob': meta_prob_success,
+                'Stationary': is_stationary,
                 'Action': action
             })
-        except: continue
-        
+        except Exception as e: 
+            continue # Foutafhandeling voor individuele tickers
+            
     return pd.DataFrame(rrg_data)
 
 def calculate_market_health(bench_series):
