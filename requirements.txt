@@ -8,3 +8,6 @@ numpy
 lxml
 openpyxl
 matplotlib
+scikit-learn
+statsmodels
+scipy
