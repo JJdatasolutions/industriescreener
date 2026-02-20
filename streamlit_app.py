@@ -288,6 +288,7 @@ def calculate_rrg_extended(df, benchmark_ticker, market_bullish=True):
             
             # DEFINITIEVE INSTITUTIONELE ALPHA SCORE
             institutional_alpha = raw_alpha * meta_prob_success
+            institutional_alpha = max(0.1, institutional_alpha)
 
             # Actie logica gebaseerd op waarschijnlijkheid en RRG positie
             action = "HOLD/WATCH"
