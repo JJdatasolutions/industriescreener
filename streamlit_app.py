@@ -203,7 +203,7 @@ def train_meta_labeler(features, labels):
 
 # --- HOOFD FUNCTIE ---
 
-def calculate_rrg_extended(df, benchmark_ticker, market_bullish=True)::
+def calculate_rrg_extended(df, benchmark_ticker, market_bullish=True):
     """
     RRG v8.0 - López de Prado Institutional Alpha
     Inclusief: MP Denoising, Volatility Adjustments, ADF Stationarity & Meta-Labeling
