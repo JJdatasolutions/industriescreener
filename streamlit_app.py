@@ -549,7 +549,7 @@ with tab3:
         current_sec = st.session_state.get('sector_sel', 'Alle Sectoren')
         st.subheader(f"Deep Dive: {current_sec}")
 
-        # --- NIEUW: PROFIEL TOGGLE ---
+        # --- NIEUW: PROFIEL TOGGLE & DYNAMISCHE LEGENDE ---
         st.markdown("### 🧠 Kies Investeringsprofiel")
         selected_profile = st.radio(
             "Selecteer je RRG strategie:",
@@ -557,6 +557,34 @@ with tab3:
             horizontal=True,
             label_visibility="collapsed"
         )
+        
+        # Dynamische uitleg voor de leek (en de pro)
+        if selected_profile == "Momentum Profile":
+            st.info("""
+            **🔥 Hoe lees je deze grafiek? (Momentum Focus)**
+            * **Doel:** Winnaars kopen die nóg harder stijgen. The trend is your friend.
+            * **Waar moet je kijken?** Rechtsboven (Leading) en linksboven (Improving).
+            * **De Legende (Heading):** Zoek naar de **felgroene bollen**. Dit betekent dat het aandeel beweegt in een hoek tussen **0° en 90°** (Noordoost). 
+            * **De Sweet Spot:** Exact **45°** is perfect. Het aandeel wint dan in een perfecte balans aan relatieve trend én momentum ten opzichte van de rest. Vermijd rood (Zuidwest)!
+            """)
+            
+        elif selected_profile == "Value Profile":
+            st.info("""
+            **💎 Hoe lees je deze grafiek? (Value/Turnaround Focus)**
+            * **Doel:** Ondergewaardeerde aandelen (koopjes) vinden die net aan een comeback beginnen én winstgevend zijn.
+            * **Waar moet je kijken?** Linksonder (Lagging) en linksboven (Improving).
+            * **De Legende (Heading):** Zoek naar de **gouden en donkerblauwe bollen**. Dit zijn aandelen die een bodem lijken te hebben gevonden en nu een opwaartse draai maken (tussen **0° en 180°**).
+            * **Belangrijk:** Grijze/dimme bollen negeren we, dat zijn vaak 'value traps' (goedkoop, maar ze blijven zakken).
+            """)
+            
+        elif selected_profile == "Balanced (Combo)":
+            st.info("""
+            **⚖️ Hoe lees je deze grafiek? (Kwaliteit + Trend)**
+            * **Doel:** De 'heilige graal'. Aandelen die fundamenteel kerngezond zijn (hoge winstgevendheid) én momenteel de wind in de zeilen hebben.
+            * **Waar moet je kijken?** De aandelen die vanuit linksboven (Improving) naar rechtsboven (Leading) oversteken.
+            * **De Legende (Heading):** Focus op de **paarse en turquoise bollen**. Dit toont een krachtige, positieve koersrichting (0° tot 90°) gesteund door sterke bedrijfscijfers onder de motorkap.
+            """)
+        
         st.markdown("---")
 
         bench_ticker = (
@@ -571,6 +599,9 @@ with tab3:
             st.error("Kon geen aandelenlijst ophalen.")
             st.stop()
 
+        # --------------------------
+        # Selecteer subset tickers
+        # --------------------------
         if current_sec != "Alle Sectoren":
             subset = constituents[constituents['Sector'] == current_sec]['Ticker'].tolist()
         else:
@@ -578,6 +609,9 @@ with tab3:
 
         dl_list = list(set(subset + [bench_ticker]))
 
+        # --------------------------
+        # Data ophalen (historisch of live)
+        # --------------------------
         with st.spinner(f"Koersdata & Factoren ophalen voor {len(dl_list)} aandelen..."):
             if use_historical:
                 df_stocks = get_price_data(dl_list, end_date=str(selected_date))
@@ -588,7 +622,9 @@ with tab3:
             st.warning("Onvoldoende koersdata.")
             st.stop()
 
-        # RRG berekenen MÉT het gekozen profiel
+        # --------------------------
+        # RRG berekenen MÉT gekozen profiel
+        # --------------------------
         rrg_stocks = calculate_rrg_extended(
             df_stocks,
             bench_ticker,
@@ -605,7 +641,7 @@ with tab3:
         st.session_state['rrg_stocks_data'] = rrg_stocks
 
         # ================================
-        # VISUALISATIE MET DYNAMISCHE KLEUREN
+        # VISUALISATIE
         # ================================
         col1, col2 = st.columns([3, 1])
 
@@ -656,7 +692,7 @@ with tab3:
             fig2.update_layout(
                 coloraxis_cmin=0, coloraxis_cmax=360,
                 coloraxis_colorscale=colorscale,
-                coloraxis_colorbar=dict(title="Richting"),
+                coloraxis_colorbar=dict(title="Richting (Graden)"),
                 template="plotly_white"
             )
 
@@ -680,7 +716,7 @@ with tab3:
             st.plotly_chart(fig2, use_container_width=True)
 
         # ================================
-        # ALPHA PICKS + FORWARD VALIDATIE
+        # ALPHA PICKS
         # ================================
         with col2:
             st.markdown("### 🎯 Alpha Picks")
@@ -693,7 +729,7 @@ with tab3:
             else: # Balanced
                 filtered_stocks = rrg_stocks
 
-            # Filter op expliciete koop signalen
+            # Filter op expliciete koop signalen (BUY of SPEC BUY)
             top_picks = filtered_stocks[
                 filtered_stocks['Action'].str.contains("BUY")
             ].sort_values("Alpha_Score", ascending=False).head(15)
@@ -701,7 +737,7 @@ with tab3:
             if top_picks.empty:
                 st.info("Geen sterke signalen gevonden voor dit profiel.")
             else:
-                # Kolommen aanpassen obv profiel
+                # Kolommen aanpassen obv profiel (Voeg Profitability toe bij Value/Combo)
                 display_cols = ['Ticker', 'Alpha_Score', 'Action']
                 if selected_profile != "Momentum Profile":
                     display_cols.insert(2, 'Gross_Profitability')
@@ -718,8 +754,58 @@ with tab3:
                     height=450
                 )
 
-        # (Forward performance block blijft hetzelfde als in je originele code)
-        # ... [Plaats je originele Forward Performance code hier terug] ...
+        # =====================================================
+        # 📈 FORWARD PERFORMANCE (ALLEEN IN HISTORISCHE MODE)
+        # =====================================================
+        if use_historical:
+
+            st.markdown("---")
+            st.markdown("## 📈 Forward Performance Analyse")
+
+            future_df = get_price_data(rrg_stocks['Ticker'].tolist())
+            perf_data = []
+
+            for ticker in rrg_stocks['Ticker']:
+                try:
+                    price_then = df_stocks[ticker].iloc[-1]
+                    price_now = future_df[ticker].iloc[-1]
+                    return_pct = ((price_now / price_then) - 1) * 100
+
+                    perf_data.append({
+                        "Ticker": ticker,
+                        "Alpha_Score": rrg_stocks.loc[
+                            rrg_stocks['Ticker'] == ticker,
+                            'Alpha_Score'
+                        ].values[0],
+                        "Return (%)": return_pct
+                    })
+                except:
+                    continue
+
+            perf_df = pd.DataFrame(perf_data)
+
+            if not perf_df.empty:
+                correlation = perf_df["Alpha_Score"].corr(perf_df["Return (%)"])
+
+                st.metric(
+                    "📊 Correlatie Alpha vs Return",
+                    f"{correlation:.2f}"
+                )
+
+                fig_perf = px.scatter(
+                    perf_df,
+                    x="Alpha_Score",
+                    y="Return (%)",
+                    text="Ticker",
+                    title="Alpha Score vs Forward Return"
+                )
+
+                st.plotly_chart(fig_perf, use_container_width=True)
+
+                st.dataframe(
+                    perf_df.sort_values("Return (%)", ascending=False),
+                    use_container_width=True
+                )
 # === TAB 4: AI ANALYST ===
 with tab4:
     st.header("🧠 Quant AI Prompt")
