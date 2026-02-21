@@ -13,7 +13,7 @@ import warnings
 warnings.filterwarnings("ignore") # Onderdruk waarschuwingen voor stationariteit tests
 
 # --- CONFIGURATIE ---
-st.set_page_config(page_title="Pro Market Screener 7.5 (Scientific RRG)", layout="wide", page_icon="🧠")
+st.set_page_config(page_title="Pro Market Screener 8.0 (Scientific RRG)", layout="wide", page_icon="🧠")
 
 # --- 1. DATA DEFINITIES ---
 MARKETS = {
@@ -752,67 +752,74 @@ with tab3:
                 st.dataframe(perf_df.sort_values("Return (%)", ascending=False), use_container_width=True)
 # === TAB 4: AI ANALYST ===
 with tab4:
-    # Plaats dit bovenaan in Tab 4, zodat de string klaarstaat voor je LLM API call
+    st.header("🧠 Quant AI Prompt")
+    
     if st.session_state.get('active'):
-    # Haal het gekozen profiel op uit tab3 als die is ingevuld, anders fallback
-    current_profile = st.session_state.get('selected_profile_tab3', 'Momentum Profile') # Je moet 'selected_profile' in tab 3 evt. opslaan in session_state!
-    
-    prompt_context = f"""
-    Je bent een Senior Quant Analyst. De gebruiker analyseert de sector {st.session_state.get('sector_sel', 'Alle')} 
-    binnen de markt {st.session_state.get('market_key', 'Onbekend')}. 
-    Het geselecteerde investeringsprofiel is: {current_profile}.
-    """
-
-    if "Value" in current_profile:
-        prompt_context += """
-        CONTEXT: De data wordt beoordeeld via een Fundamental Map. 
-        X-as = Book-to-Market proxy (hoger = goedkoper, gebaseerd op diepe drawdowns).
-        Y-as = Gross Profitability (Novy-Marx methode).
-        Jouw taak: Beoordeel de 'Profitability Premium'. Negeer pure RRG trend metrics. Focus op aandelen die extreem goedkoop zijn (hoge B/M) maar met ijzersterke winstgevendheid (Gross Profitability > 35%). Waarschuw expliciet voor 'Value Traps' (goedkoop, maar lage winst).
-        """
-    else:
-        prompt_context += """
-        CONTEXT: De data wordt beoordeeld via een klassieke Relative Rotation Graph (RRG).
-        X-as = RS-Ratio (trend), Y-as = RS-Momentum (snelheid).
-        Jouw taak: Focus op aandelen die in de richting van 0 tot 90 graden (Noordoost) bewegen en zich in het 'Leading' of 'Improving' kwadrant bevinden. Leg de nadruk op de Alpha Score en de 45° Sweet Spot.
-        """
-        st.header("🧠 Quant AI Prompt")
-    
-    if 'rrg_stocks_data' in st.session_state:
-        rrg_data = st.session_state['rrg_stocks_data']
-        stock_pick = st.selectbox("Selecteer aandeel:", rrg_data['Ticker'].unique())
-        
-        if stock_pick:
-            row = rrg_data[rrg_data['Ticker'] == stock_pick].iloc[0]
-            regime = "BULL" if market_bull_flag else "BEAR"
+        # Controleer eerst of de data uit tab 3 beschikbaar is
+        if 'rrg_stocks_data' in st.session_state:
+            # Haal het gekozen profiel op uit tab3 (fallback: Momentum)
+            current_profile = st.session_state.get('selected_profile_tab3', 'Momentum Profile') 
             
-            ai_prompt = f"""
+            # 1. Bouw de specifieke context op basis van het gekozen profiel
+            prompt_context = f"""
+            Je bent een Senior Quant Analyst. De gebruiker analyseert de sector {st.session_state.get('sector_sel', 'Alle')} 
+            binnen de markt {st.session_state.get('market_key', 'Onbekend')}. 
+            Het geselecteerde investeringsprofiel is: {current_profile}.
+            """
+
+            if "Value" in current_profile:
+                prompt_context += """
+                CONTEXT: De data wordt beoordeeld via een Fundamental Map. 
+                X-as = Book-to-Market proxy (hoger = goedkoper, gebaseerd op diepe drawdowns).
+                Y-as = Gross Profitability (Novy-Marx methode).
+                Jouw taak: Beoordeel de 'Profitability Premium'. Negeer pure RRG trend metrics. Focus op aandelen die extreem goedkoop zijn (hoge B/M) maar met ijzersterke winstgevendheid (Gross Profitability > 35%). Waarschuw expliciet voor 'Value Traps' (goedkoop, maar lage winst).
+                """
+            else:
+                prompt_context += """
+                CONTEXT: De data wordt beoordeeld via een klassieke Relative Rotation Graph (RRG).
+                X-as = RS-Ratio (trend), Y-as = RS-Momentum (snelheid).
+                Jouw taak: Focus op aandelen die in de richting van 0 tot 90 graden (Noordoost) bewegen en zich in het 'Leading' of 'Improving' kwadrant bevinden. Leg de nadruk op de Alpha Score en de 45° Sweet Spot.
+                """
+            
+            # 2. Haal de aandelendata op
+            rrg_data = st.session_state['rrg_stocks_data']
+            stock_pick = st.selectbox("Selecteer aandeel voor AI Deep Dive:", rrg_data['Ticker'].unique())
+            
+            if stock_pick:
+                row = rrg_data[rrg_data['Ticker'] == stock_pick].iloc[0]
+                # Fallback toegevoegd voor de bull_flag om NameErrors te voorkomen
+                is_bull = st.session_state.get('market_bull_flag', True) 
+                regime = "BULL" if is_bull else "BEAR"
+                
+                # 3. Voeg de context en de harde data samen in één strakke prompt
+                ai_prompt = f"""{prompt_context}
+
 Systeem: Je bent een AI Investment Committee Swarm bestaande uit een Quant Strategist, een Fundamenteel Analist en een Risk Manager. 
 Analyseer de asset **{stock_pick}** in een **{regime}** markt-regime.
 
-HARD DATA (Mijn RRG Model):
+HARD DATA (Mijn Model):
 - **Alpha Score:** {row['Alpha_Score']:.2f} (Schaal 0-10+. Hoger is beter).
-- **Heading:** {row['Heading']:.1f}° (Target = 45°).
+- **Heading:** {row['Heading']:.1f}° (Target = 45° voor momentum, n.v.t. voor pure value).
 - **Actie Signaal:** {row['Action']}
 - **Afstand tot Benchmark:** {row['Distance']:.2f}
-- **Positie:** {row['Kwadrant']}
+- **Positie / Kwadrant:** {row['Kwadrant']}
 
 DE SWARM OVERLEGT:
 
-- **De Quant (De wiskundige):** Analyseert de RRG-statistieken. Is de Alpha Score stabiel? Wat zegt de afstand van {row['Distance']:.2f} over de overbought/oversold status t.o.v. de benchmark?
+- **De Quant (De wiskundige):** Analyseert de statistieken. Is de Alpha Score stabiel? Wat zegt de data over de huidige status t.o.v. de benchmark?
 - **De Fundamentele Analist (De criticus):** Zoekt naar de 'waarom'. Is er sprake van sector-rotatie? Welke nieuws-events (earnings, macro) beïnvloeden {stock_pick} op dit moment?
 - **De Risk Manager (De bewaker):** Berekent de optimale entry en exit. Formuleer een trade-plan met een duidelijke risk-to-reward ratio.
 
 JULLIE OPDRACHT:
 
 1. QUANT AUDIT (De Quant):
-Evalueer de vector-kwaliteit. Is een Heading van {row['Heading']:.1f}° een teken van duurzame versnelling of naderende uitputting? Interpreteer de afstand ({row['Distance']:.2f}) t.o.v. de benchmark (over-extended of beginnende trend?).
+Evalueer de metrieken. Past dit binnen het gekozen '{current_profile}'? Interpreteer de signalen. Is de trend duurzaam of over-extended?
 
 2. FUNDAMENTELE VALIDATIE (De Analist):
-Valideer het '{row['Action']}' signaal. Wees sceptisch tegenover de data. Zoek naar de primaire katalysator voor deze sector-rotatie (bijv. rentegevoeligheid, earnings season, macro-cijfers). Waarom stroomt er specifiek NU kapitaal naar of uit {stock_pick}?
+Valideer het '{row['Action']}' signaal. Wees sceptisch tegenover de data. Zoek naar de primaire katalysator. Waarom stroomt er specifiek NU kapitaal naar of uit {stock_pick}?
 
 3. RISK & VOLATILITY (De Risk Manager):
-Geef concrete entry- en exit-levels. Gebruik de huidige marktvolatiliteit om een logische Stop-Loss en een 'Take Profit' target te bepalen die past bij de huidige Alpha Score.
+Geef concrete entry- en exit-levels. Gebruik actuele steun/weerstanden om een logische Stop-Loss en een 'Take Profit' target te bepalen.
 
 4. HET OORDEEL (De Consensus):
 Synthetiseer de inzichten in een definitief advies: 
@@ -821,6 +828,9 @@ Synthetiseer de inzichten in een definitief advies:
 
 Schrijf in een professionele, beknopte Hedge Fund memo-stijl. Wees kritisch op de data.
 """
-            st.text_area("Prompt:", value=ai_prompt, height=400)
+                st.text_area("Kopieer deze prompt en plak hem in je favoriete LLM:", value=ai_prompt, height=450)
+                
+        else:
+            st.warning("⚠️ Draai eerst de analyse in Tab 3 (Aandelen) om data te genereren.")
     else:
-        st.warning("Draai eerst Tab 3.")
+        st.info("Druk op 'Start Analyse' in de zijbalk om te beginnen.")
