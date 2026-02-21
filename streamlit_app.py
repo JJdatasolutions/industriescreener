@@ -626,28 +626,45 @@ with tab3:
         st.session_state['selected_profile_tab3'] = selected_profile
         
         if selected_profile == "Momentum Profile":
+            
             st.info("""
             **🔥 Hoe lees je deze grafiek? (Momentum Focus)**
-            * **Doel:** Winnaars kopen die nóg harder stijgen.
-            * **Assen:** Klassieke RRG (RS-Ratio vs RS-Momentum).
-            * **Hover Tip:** Ga met je muis over een bol om de ↗️ (richtingspijl) te zien!
+            * **Filosofie:** *Buy high, sell higher.* We zoeken aandelen die de benchmark verslaan en wéér versnellen.
+            * **De Assen (RRG):**
+                * **X-as (RS-Ratio):** De langetermijntrend. Boven de 100 = structurele outperformance t.o.v. de benchmark.
+                * **Y-as (RS-Momentum):** De snelheid van de trend. Boven de 100 = momentum neemt toe.
+            * **De 4 Kwadranten:**
+                * 🟢 **Leading (Rechtsboven):** Sterke trend, sterk momentum. De huidige marktleiders.
+                * 🟡 **Weakening (Rechtsonder):** Sterke trend, maar verliest snelheid. Tijd om winst te nemen of trailing stops aan te trekken.
+                * 🔴 **Lagging (Linksonder):** Zwakke trend, zwak momentum. Kapitaal stroomt hier weg.
+                * 🔵 **Improving (Linksboven):** Zwakke trend, maar bouwt snel momentum op. De vroege instap!
+            * **De Sweet Spot:** Zoek naar aandelen in *Improving* die naar *Leading* krullen. In de hover-tooltip zie je dit als de ↗️ (Noordoost) pijl. De grootte van de bol = Alpha Score (hoe groter, hoe robuuster het signaal).
             """)
+            
         elif selected_profile == "Value Profile":
+            
             st.info("""
-            **💎 Hoe lees je deze grafiek? (Value Focus)**
-            * **Doel:** Kwalitatieve bedrijven kopen voor een lage prijs (Novy-Marx methode).
-            * **Assen:** Waardering (Proxy voor Book-to-Market) vs Kwaliteit (Gross Profitability).
-            * **Waar moet je kijken?** Rechtsboven in de *Novy-Marx Premium Zone*. 
+            **💎 Hoe lees je deze grafiek? (Value & Quality Focus)**
+            * **Filosofie:** De 'Novy-Marx' methode. Goedkoop inkopen is goed, maar goedkoop én extreem winstgevend inkopen is beter. We filteren de beruchte *Value Traps* eruit.
+            * **De Assen (Fundamental Map):**
+                * **X-as (Waardering / Book-to-Market Proxy):** Gebaseerd op stevige drawdowns. Hoe verder naar rechts, hoe groter de korting t.o.v. de historische piek.
+                * **Y-as (Kwaliteit / Gross Profitability):** Hoe verder naar boven, hoe efficiënter het bedrijf winst genereert uit zijn activa.
+            * **Waar moet je kijken?**
+                * ⭐ **De Premium Zone (Rechtsboven):** Het paradijs. Aandelen die zwaar zijn afgestraft (goedkoop), maar onderliggend nog steeds kerngezond en zeer winstgevend zijn.
+                * ⚠️ **Value Traps (Rechtsonder):** Spotgoedkoop, maar het bedrijf maakt nauwelijks winst. Vaak is het goedkoop met een reden. Blijf weg!
+                * ❌ **Expensive Junk (Linksonder):** Duur én verlieslatend. Het gevaarlijkste territorium op de beurs.
             """)
+            
         elif selected_profile == "Balanced (Combo)":
             st.info("""
-            **⚖️ Hoe lees je deze grafiek? (Kwaliteit + Trend)**
-            * **Doel:** Kerngezonde bedrijven die nu momentum krijgen.
-            * **Assen:** Klassieke RRG (RS-Ratio vs RS-Momentum), maar we filteren streng op fundamenten.
+            **⚖️ Hoe lees je deze grafiek? (GARP / Quality-Trend Focus)**
+            * **Filosofie:** *Growth at a Reasonable Price* gemixt met trendvolging. Je weigert de bodem te vissen (zoals bij pure Value), maar je betaalt ook niet de hoofdprijs voor een over-extended hype (zoals bij puur Momentum).
+            * **De Assen:** We gebruiken de klassieke **RRG Assen** (RS-Ratio en RS-Momentum) om de perfecte instaptiming te bepalen.
+            * **De Filter:** De 'Alpha Score' (grootte van de bol) en de signalen zijn in dit profiel extra streng. Een aandeel krijgt pas een koopsignaal als het *zowel* een hoge Gross Profitability heeft (fundamenten op orde) *als* kwantitatief momentum opbouwt (de RRG krul naar boven).
+            * **Strategie:** Zoek in de grafiek naar de ↗️ (Noordoost) pijlen in het linkerboven- of rechterbovenkwadrant, maar focus uitsluitend op de **grootste bollen**. Dit zijn de kwaliteitsbedrijven die exact nu door institutioneel kapitaal worden opgepakt.
             """)
         
         st.markdown("---")
-
         bench_ticker = (
             US_SECTOR_MAP.get(current_sec, market_cfg['benchmark'])
             if "USA" in st.session_state['market_key'] and current_sec != "Alle Sectoren"
