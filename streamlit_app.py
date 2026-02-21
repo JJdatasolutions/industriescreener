@@ -724,36 +724,46 @@ with tab3:
             # Harde logische filters op basis van profiel
             if selected_profile == "Momentum Profile":
                 filtered_stocks = rrg_stocks[rrg_stocks['Kwadrant'].str.contains("1. LEADING|4. IMPROVING")]
+                display_cols = ['Ticker', 'Alpha_Score', 'RS-Momentum', 'Action']
+                sort_col = "Alpha_Score"
+                
             elif selected_profile == "Value Profile":
                 filtered_stocks = rrg_stocks[rrg_stocks['Kwadrant'].str.contains("3. LAGGING|4. IMPROVING")]
+                display_cols = ['Ticker', 'Heading', 'Gross_Profitability', 'Action']
+                sort_col = "Gross_Profitability" # Sorteer op kwaliteit voor value
+                
             else: # Balanced
                 filtered_stocks = rrg_stocks
+                display_cols = ['Ticker', 'Alpha_Score', 'Gross_Profitability', 'Action']
+                sort_col = "Alpha_Score"
 
             # Filter op expliciete koop signalen (BUY of SPEC BUY)
             top_picks = filtered_stocks[
                 filtered_stocks['Action'].str.contains("BUY")
-            ].sort_values("Alpha_Score", ascending=False).head(15)
+            ].sort_values(sort_col, ascending=False).head(15)
 
             if top_picks.empty:
                 st.info("Geen sterke signalen gevonden voor dit profiel.")
             else:
-                # Kolommen aanpassen obv profiel (Voeg Profitability toe bij Value/Combo)
-                display_cols = ['Ticker', 'Alpha_Score', 'Action']
-                if selected_profile != "Momentum Profile":
-                    display_cols.insert(2, 'Gross_Profitability')
+                # Dynamische opmaak afhankelijk van welke kolommen in de lijst zitten
+                format_dict = {}
+                if "Alpha_Score" in display_cols:
+                    format_dict["Alpha_Score"] = "{:.1f}"
+                if "Gross_Profitability" in display_cols:
+                    format_dict["Gross_Profitability"] = "{:.1%}"
+                if "Heading" in display_cols:
+                    format_dict["Heading"] = "{:.0f}°"
+                if "RS-Momentum" in display_cols:
+                    format_dict["RS-Momentum"] = "{:.1f}"
 
                 st.dataframe(
                     top_picks[display_cols]
-                    .style.background_gradient(subset=['Alpha_Score'], cmap='Greens')
-                    .format({
-                        "Alpha_Score": "{:.1f}", 
-                        "Gross_Profitability": "{:.1%}" # Maak er mooie procenten van
-                    }),
+                    .style.background_gradient(subset=[sort_col], cmap='Greens')
+                    .format(format_dict),
                     hide_index=True,
                     use_container_width=True,
                     height=450
                 )
-
         # =====================================================
         # 📈 FORWARD PERFORMANCE (ALLEEN IN HISTORISCHE MODE)
         # =====================================================
