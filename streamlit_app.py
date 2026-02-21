@@ -753,7 +753,7 @@ with tab3:
 # === TAB 4: AI ANALYST ===
 with tab4:
     # Plaats dit bovenaan in Tab 4, zodat de string klaarstaat voor je LLM API call
-if st.session_state.get('active'):
+    if st.session_state.get('active'):
     # Haal het gekozen profiel op uit tab3 als die is ingevuld, anders fallback
     current_profile = st.session_state.get('selected_profile_tab3', 'Momentum Profile') # Je moet 'selected_profile' in tab 3 evt. opslaan in session_state!
     
