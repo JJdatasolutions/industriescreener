@@ -622,13 +622,15 @@ with tab3:
             horizontal=True,
             label_visibility="collapsed"
         )
+        # Sla op voor Tab 4
+        st.session_state['selected_profile_tab3'] = selected_profile
         
         if selected_profile == "Momentum Profile":
             st.info("""
             **🔥 Hoe lees je deze grafiek? (Momentum Focus)**
             * **Doel:** Winnaars kopen die nóg harder stijgen.
             * **Assen:** Klassieke RRG (RS-Ratio vs RS-Momentum).
-            * **De Legende (Heading):** Zoek naar de **felgroene bollen** (0° tot 90°).
+            * **Hover Tip:** Ga met je muis over een bol om de ↗️ (richtingspijl) te zien!
             """)
         elif selected_profile == "Value Profile":
             st.info("""
@@ -685,6 +687,21 @@ with tab3:
 
         rrg_stocks = rrg_stocks.dropna(subset=['RS-Ratio', 'RS-Momentum', 'Alpha_Score'])
         rrg_stocks = rrg_stocks[rrg_stocks['Distance'] > 0]
+        
+        # --- PIJL LOGICA VOOR HOVER ---
+        def get_directional_arrow(degrees):
+            if degrees is None or pd.isna(degrees): return "❓"
+            val = degrees % 360
+            if val <= 22.5 or val > 337.5: return "➡️ (Oost - Momentum opbouw)"
+            elif val <= 67.5: return "↗️ (Noordoost - SWEET SPOT)"
+            elif val <= 112.5: return "⬆️ (Noord - Snelheid stijgt)"
+            elif val <= 157.5: return "↖️ (Noordwest - Verliest trend)"
+            elif val <= 202.5: return "⬅️ (West - Zwakt af)"
+            elif val <= 247.5: return "↙️ (Zuidwest - SHORT ZONE)"
+            elif val <= 292.5: return "⬇️ (Zuid - Bodemvorming?)"
+            else: return "↘️ (Zuidoost - Herstel)"
+
+        rrg_stocks['Richting'] = rrg_stocks['Heading'].apply(get_directional_arrow)
         st.session_state['rrg_stocks_data'] = rrg_stocks
 
         col1, col2 = st.columns([3, 1])
@@ -697,18 +714,21 @@ with tab3:
                 colorscale = [(0.0, "#e5e7eb"), (0.125, "#00ff00"), (0.25, "#10b981"), (0.5, "#fca5a5"), (1.0, "#450a0a")]
                 x_col, y_col = "RS-Ratio", "RS-Momentum"
                 x_axis_title, y_axis_title = "RS-Ratio (Trend)", "RS-Momentum (Snelheid)"
+                hover_data_list = ["Kwadrant", "Action", "Richting"]
             elif selected_profile == "Value Profile":
                 colorscale = [(0.0, "#e5e7eb"), (0.125, "#ffd700"), (0.25, "#4169e1"), (0.5, "#d3d3d3"), (1.0, "#696969")]
                 x_col, y_col = "Value_Proxy", "Gross_Profitability"
                 x_axis_title, y_axis_title = "Waardering (Book-to-Market Proxy)", "Kwaliteit (Gross Profitability)"
+                hover_data_list = ["Kwadrant", "Action", "Gross_Profitability", "Value_Proxy"]
             else:
                 colorscale = [(0.0, "#e5e7eb"), (0.125, "#8a2be2"), (0.25, "#00ced1"), (0.5, "#ffb6c1"), (1.0, "#8b0000")]
                 x_col, y_col = "RS-Ratio", "RS-Momentum"
                 x_axis_title, y_axis_title = "RS-Ratio", "RS-Momentum"
+                hover_data_list = ["Kwadrant", "Action", "Richting", "Gross_Profitability"]
 
             fig2 = px.scatter(
                 rrg_stocks, x=x_col, y=y_col, color="Heading", text="Ticker", size="Alpha_Score",
-                height=700, hover_data=["Kwadrant", "Action", "Gross_Profitability", "Value_Proxy"],
+                height=700, hover_data=hover_data_list,
                 title=f"<b>SIGNAL MAP: {current_sec} | {selected_profile}</b>"
             )
 
@@ -796,6 +816,7 @@ with tab3:
                 fig_perf = px.scatter(perf_df, x="Alpha_Score", y="Return (%)", text="Ticker", title="Alpha Score vs Forward Return")
                 st.plotly_chart(fig_perf, use_container_width=True)
                 st.dataframe(perf_df.sort_values("Return (%)", ascending=False), use_container_width=True)
+                
 # === TAB 4: AI ANALYST ===
 with tab4:
     st.header("🧠 Quant AI Prompt")
