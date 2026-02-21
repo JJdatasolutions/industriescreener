@@ -477,6 +477,7 @@ with tab2:
                 calc_tickers = list(set(tickers + [market_cfg['benchmark']]))
                 df_sec = get_price_data(calc_tickers)
                 
+                # Bepaal profiel string voor de berekening
                 prof_str = "Value Profile" if "Value" in sector_profile else "Momentum Profile"
                 rrg_sec = calculate_rrg_extended(df_sec, market_cfg['benchmark'], market_bullish=market_bull_flag, profile=prof_str)
                 
@@ -486,7 +487,7 @@ with tab2:
                     rrg_sec = rrg_sec[rrg_sec['Ticker'].isin(tickers)]
                     rrg_sec = rrg_sec[rrg_sec['Distance'] > 0]
 
-                    # Kleurenschaal (behoud focus op momentum richting, zelfs bij value handig)
+                    # Gedeelde kleurenschaal voor consistentie
                     custom_color_scale = [
                         (0.00, "#e5e7eb"),  
                         (0.125, "#00ff00"), 
@@ -495,9 +496,11 @@ with tab2:
                         (1.00, "#450a0a")   
                     ]
 
-                    # --- ASSEN BEPALEN ---
+                    # --- PLOT LOGICA ---
                     if "Value" in sector_profile:
-                        # Novy-Marx Fundamental Map
+                        # =========================================
+                        # 1. FUNDAMENTAL MAP (Geen pijlen)
+                        # =========================================
                         x_col = "Value_Proxy"
                         y_col = "Gross_Profitability"
                         x_title = "Waardering (Book-to-Market Proxy) ➡️ Goedkoper"
@@ -509,7 +512,7 @@ with tab2:
                             height=650, hover_data=["Kwadrant", "Action"], title=chart_title
                         )
                         
-                        # Value Focus Area (Rechtsboven)
+                        # Value Focus Area (Rechtsboven) toevoegen
                         x_max = rrg_sec[x_col].max() * 1.05
                         y_max = rrg_sec[y_col].max() * 1.05
                         med_x = rrg_sec[x_col].median()
@@ -521,26 +524,62 @@ with tab2:
                                            text="⭐ VALUE & QUALITY", showarrow=False, font=dict(color="goldenrod", size=14))
                         
                     else:
-                        # Standaard RRG Map
+                        # =========================================
+                        # 2. MOMENTUM RRG (MET PIJLEN!)
+                        # =========================================
                         x_col = "RS-Ratio"
                         y_col = "RS-Momentum"
                         x_title = "RS-Ratio (Trend)"
                         y_title = "RS-Momentum (Snelheid)"
-                        chart_title = "<b>SECTOR ROTATIE (RRG)</b> <br><sup>Focus op 45° (Fel Groen) | Grootte = Alpha</sup>"
+                        chart_title = "<b>SECTOR ROTATIE (RRG)</b> <br><sup>Focus op 45° (Fel Groen) | Pijlen tonen richting</sup>"
                         
                         fig = px.scatter(
                             rrg_sec, x=x_col, y=y_col, color="Heading", text="Label", size="Alpha_Score",
                             height=650, hover_data=["Kwadrant", "Action", "Distance"], title=chart_title
                         )
+                        
+                        # --- DE PIJLEN TOEVOEGEN ---
+                        # We itereren door elke sector en voegen een pijl-annotatie toe
+                        for i, row in rrg_sec.iterrows():
+                            # Bepaal startpunt (huidige positie)
+                            start_x = row[x_col]
+                            start_y = row[y_col]
+                            
+                            # Bepaal eindpunt van de pijl op basis van Heading
+                            # We gebruiken een vaste visuele lengte (bijv. 2.5 eenheden op de schaal)
+                            arrow_length = 2.5
+                            heading_rad = math.radians(row['Heading'])
+                            
+                            # Wiskunde: Nieuwe X = Oude X + cos(hoek) * lengte
+                            end_x = start_x + math.cos(heading_rad) * arrow_length
+                            end_y = start_y + math.sin(heading_rad) * arrow_length
+                            
+                            fig.add_annotation(
+                                x=end_x, y=end_y, # Pijlpunt (waar gaat het heen)
+                                ax=start_x, ay=start_y, # Pijlstaart (waar is het nu)
+                                xref="x", yref="y", axref="x", ayref="y", # Gebruik de assen-schalen
+                                text="", # Geen tekst bij de pijl zelf
+                                showarrow=True,
+                                arrowhead=2, # Strakke pijlpunt
+                                arrowsize=1,
+                                arrowwidth=2,
+                                arrowcolor="rgba(50, 50, 50, 0.6)", # Subtiel donkergrijs, deels transparant
+                                opacity=0.8
+                            )
+
+                        # RRG referentielijnen en watermerken
                         fig.add_hline(y=100); fig.add_vline(x=100)
                         fig.add_annotation(x=101, y=101, text="LEADING", showarrow=False, font=dict(size=14, color="rgba(0,128,0,0.3)"))
                         fig.add_annotation(x=99, y=99, text="LAGGING", showarrow=False, font=dict(size=14, color="rgba(255,0,0,0.3)"))
                         
+                        # Assen netjes schalen
                         max_dev = max(abs(rrg_sec['RS-Ratio']-100).max(), abs(rrg_sec['RS-Momentum']-100).max()) * 1.1
                         fig.update_xaxes(range=[100-max_dev, 100+max_dev])
                         fig.update_yaxes(range=[100-max_dev, 100+max_dev])
 
-                    # Gedeelde opmaak
+                    # =========================================
+                    # GEDEELDE OPMAAK & WEERGAVE
+                    # =========================================
                     fig.update_traces(marker=dict(line=dict(width=1, color='black'), opacity=0.9), textposition='top center', textfont=dict(size=11, color='darkslategrey', family="Arial Black"))
                     fig.update_layout(
                         xaxis_title=x_title, yaxis_title=y_title, template="plotly_white",
@@ -550,17 +589,24 @@ with tab2:
                     )
                     st.plotly_chart(fig, use_container_width=True)
                     
+                    # De tabel eronder
                     st.markdown("#### 🏆 Sector Ranking")
                     sort_col = "Gross_Profitability" if "Value" in sector_profile else "Alpha_Score"
                     top_sec = rrg_sec.sort_values(sort_col, ascending=False)
+                    
+                    # Zorg dat de kolommen bestaan voordat we ze tonen
+                    disp_cols = ['Label', 'Heading', 'Action']
+                    if 'Alpha_Score' in top_sec.columns: disp_cols.insert(1, 'Alpha_Score')
+                    if 'Gross_Profitability' in top_sec.columns and "Value" in sector_profile: disp_cols.insert(2, 'Gross_Profitability')
+
                     st.dataframe(
-                        top_sec[['Label', 'Alpha_Score', 'Gross_Profitability', 'Heading', 'Action']].style
-                        .background_gradient(subset=[sort_col], cmap='Greens')
-                        .format({"Heading": "{:.0f}°", "Alpha_Score": "{:.1f}", "Gross_Profitability": "{:.1%}"}),
+                        top_sec[disp_cols].style
+                        .background_gradient(subset=[sort_col] if sort_col in top_sec.columns else None, cmap='Greens')
+                        .format({"Heading": "{:.0f}°", "Alpha_Score": "{:.1f}", "Gross_Profitability": "{:.1%}"}, na_rep="-"),
                         hide_index=True, use_container_width=True
                     )
-                else: st.warning("Geen sector data.")
-            else: st.warning("Geen tickers.")
+                else: st.warning("Geen sector data kunnen berekenen.")
+            else: st.warning("Geen tickers gevonden voor deze markt.")
                 
 # === TAB 3: AANDELEN ===
 with tab3:
