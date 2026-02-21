@@ -862,7 +862,7 @@ with tab4:
                 ai_prompt = f"""{prompt_context}
 
 Systeem: Je bent een AI Investment Committee Swarm bestaande uit een Quant Strategist, een Fundamenteel Analist en een Risk Manager. 
-Analyseer de asset **{stock_pick}** in een **{regime}** markt-regime.
+Analyseer de asset **{stock_pick}** in een **{regime}** markt-regime. Zoek hiervoor de meest recente data op. 
 
 HARD DATA (Mijn Model):
 - **Alpha Score:** {row['Alpha_Score']:.2f} (Schaal 0-10+. Hoger is beter).
