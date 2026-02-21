@@ -752,7 +752,31 @@ with tab3:
                 st.dataframe(perf_df.sort_values("Return (%)", ascending=False), use_container_width=True)
 # === TAB 4: AI ANALYST ===
 with tab4:
-    st.header("🧠 Quant AI Prompt")
+    # Plaats dit bovenaan in Tab 4, zodat de string klaarstaat voor je LLM API call
+if st.session_state.get('active'):
+    # Haal het gekozen profiel op uit tab3 als die is ingevuld, anders fallback
+    current_profile = st.session_state.get('selected_profile_tab3', 'Momentum Profile') # Je moet 'selected_profile' in tab 3 evt. opslaan in session_state!
+    
+    prompt_context = f"""
+    Je bent een Senior Quant Analyst. De gebruiker analyseert de sector {st.session_state.get('sector_sel', 'Alle')} 
+    binnen de markt {st.session_state.get('market_key', 'Onbekend')}. 
+    Het geselecteerde investeringsprofiel is: {current_profile}.
+    """
+
+    if "Value" in current_profile:
+        prompt_context += """
+        CONTEXT: De data wordt beoordeeld via een Fundamental Map. 
+        X-as = Book-to-Market proxy (hoger = goedkoper, gebaseerd op diepe drawdowns).
+        Y-as = Gross Profitability (Novy-Marx methode).
+        Jouw taak: Beoordeel de 'Profitability Premium'. Negeer pure RRG trend metrics. Focus op aandelen die extreem goedkoop zijn (hoge B/M) maar met ijzersterke winstgevendheid (Gross Profitability > 35%). Waarschuw expliciet voor 'Value Traps' (goedkoop, maar lage winst).
+        """
+    else:
+        prompt_context += """
+        CONTEXT: De data wordt beoordeeld via een klassieke Relative Rotation Graph (RRG).
+        X-as = RS-Ratio (trend), Y-as = RS-Momentum (snelheid).
+        Jouw taak: Focus op aandelen die in de richting van 0 tot 90 graden (Noordoost) bewegen en zich in het 'Leading' of 'Improving' kwadrant bevinden. Leg de nadruk op de Alpha Score en de 45° Sweet Spot.
+        """
+        st.header("🧠 Quant AI Prompt")
     
     if 'rrg_stocks_data' in st.session_state:
         rrg_data = st.session_state['rrg_stocks_data']
