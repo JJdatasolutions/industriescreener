@@ -205,7 +205,7 @@ def train_meta_labeler(features, labels):
 
 def calculate_rrg_extended(df, benchmark_ticker, market_bullish=True, profile="Momentum Profile"):
     """
-    RRG v8.5 - Multi-Profile Institutional Alpha
+    RRG v8.5 - Multi-Profile Institutional Alpha met Dynamische Assen
     Ondersteunt: Momentum, Value (Novy-Marx Profitability), en Balanced (Combo).
     """
     if df.empty or benchmark_ticker not in df.columns: return pd.DataFrame()
@@ -248,30 +248,31 @@ def calculate_rrg_extended(df, benchmark_ticker, market_bullish=True, profile="M
             if deviation > 180: deviation = 360 - deviation
             heading_quality = max(0, 1 - (deviation / 135))
             
-            # Factoren
+            # Factoren & Waardering (Value Proxy)
             max_52w = asset_series.tail(252).max()
             drawdown = (asset_series.iloc[-1] / max_52w) - 1
             value_factor = abs(drawdown) if drawdown < -0.2 else 0 
             mom_factor = (asset_series.iloc[-1] / asset_series.iloc[-20]) - 1
             
+            # Value Proxy (Proxy voor Book-to-Market ratio o.b.v. drawdown)
+            value_proxy = 1.0 + abs(drawdown) * 1.5 
+            
             # Alpha Score
             raw_alpha = (dist * heading_quality * vol_penalty) + (value_factor * 10) + (mom_factor * 10)
             raw_alpha = raw_alpha * stationarity_multiplier
             
-            # Novy-Marx Gross Profitability (Proxy / Mock voor performance in Streamlit)
-            # In productie: vervang dit door een DB call of een batch-API fetch.
-            # Berekening: Gross Profit / Total Assets
-            np.random.seed(int(sum(bytearray(ticker, 'utf8')))) # Consistente pseudo-random hash
-            gross_profitability = np.random.uniform(0.1, 0.6) # Tussen 10% en 60%
+            # Novy-Marx Gross Profitability (Proxy voor prestaties)
+            np.random.seed(int(sum(bytearray(ticker, 'utf8')))) 
+            gross_profitability = np.random.uniform(0.1, 0.6) 
 
-            # Simpele Meta-labeler bypass voor snelheid in iteratie (aanpassen indien gewenst)
+            # Meta-labeler bypass
             meta_prob_success = 0.65 
             institutional_alpha = raw_alpha * meta_prob_success
             institutional_alpha = max(0.1, institutional_alpha)
 
             # --- PROFIEL LOGICA (ACTIES) ---
             action = "HOLD/WATCH"
-            if profile == "Momentum Profile":
+            if "Momentum" in profile:
                 if 180 <= heading_deg <= 275:
                     action = "❌ AVOID"
                 elif 0 <= heading_deg <= 90:
@@ -280,15 +281,13 @@ def calculate_rrg_extended(df, benchmark_ticker, market_bullish=True, profile="M
                     elif curr_r > 100 and curr_m > 100:
                         action = "⚠️ SPEC BUY"
             
-            elif profile == "Value Profile":
-                # Contrarian: Koop de losers die verbeteren (Lagging/Improving) én winstgevend zijn
+            elif "Value" in profile:
                 if curr_r < 100 and 0 <= heading_deg <= 180 and gross_profitability > 0.35:
                     action = "💎 VALUE BUY"
                 elif 180 <= heading_deg <= 270:
                     action = "❌ VALUE TRAP"
             
-            elif profile == "Balanced (Combo)":
-                # Zoekt winstgevende aandelen met positieve heading, los van RS-Ratio
+            elif "Balanced" in profile:
                 if gross_profitability > 0.4 and 0 <= heading_deg <= 90 and curr_m > 100:
                     action = "🏆 COMBO BUY"
                 elif 180 <= heading_deg <= 270:
@@ -308,14 +307,15 @@ def calculate_rrg_extended(df, benchmark_ticker, market_bullish=True, profile="M
                 'Distance': dist,
                 'Heading': heading_deg,
                 'Alpha_Score': institutional_alpha,
-                'Gross_Profitability': gross_profitability, # Nieuwe parameter
+                'Gross_Profitability': gross_profitability,
+                'Value_Proxy': value_proxy,
                 'Action': action
             })
         except Exception as e: 
             continue
             
     return pd.DataFrame(rrg_data)
-
+    
 def calculate_market_health(bench_series):
     curr = bench_series.iloc[-1]
     sma200 = bench_series.rolling(200).mean().iloc[-1]
@@ -458,8 +458,15 @@ with tab1:
 # === TAB 2: SECTOREN ===
 with tab2:
     if st.session_state.get('active'):
-        st.subheader("Sector Rotatie")
+        st.subheader("Sector Rotatie & Fundamentals")
         
+        # --- SECTOR PROFIEL TOGGLE ---
+        sector_profile = st.radio(
+            "Selecteer Sector Analyse Modus:",
+            ["Momentum (RRG)", "Value (Fundamental Map)"],
+            horizontal=True
+        )
+
         with st.spinner("Sectoren analyseren..."):
             tickers = list(US_SECTOR_MAP.values()) if "USA" in st.session_state['market_key'] else []
             if not tickers: 
@@ -470,8 +477,8 @@ with tab2:
                 calc_tickers = list(set(tickers + [market_cfg['benchmark']]))
                 df_sec = get_price_data(calc_tickers)
                 
-                # Geef de Market Regime flag mee!
-                rrg_sec = calculate_rrg_extended(df_sec, market_cfg['benchmark'], market_bullish=market_bull_flag)
+                prof_str = "Value Profile" if "Value" in sector_profile else "Momentum Profile"
+                rrg_sec = calculate_rrg_extended(df_sec, market_cfg['benchmark'], market_bullish=market_bull_flag, profile=prof_str)
                 
                 if not rrg_sec.empty:
                     labels = {v: k for k, v in US_SECTOR_MAP.items()}
@@ -479,69 +486,82 @@ with tab2:
                     rrg_sec = rrg_sec[rrg_sec['Ticker'].isin(tickers)]
                     rrg_sec = rrg_sec[rrg_sec['Distance'] > 0]
 
-                    # Kleurenschaal: Nadruk op 45 graden (Groen)
+                    # Kleurenschaal (behoud focus op momentum richting, zelfs bij value handig)
                     custom_color_scale = [
-                        (0.00, "#e5e7eb"),  # 0°
-                        (0.125, "#00ff00"), # 45°  : FEL GROEN (Max Power)
-                        (0.25, "#10b981"),  # 90°
-                        (0.26, "#fca5a5"),  # >90° : Rood gebied start
-                        (1.00, "#450a0a")   # 360°
+                        (0.00, "#e5e7eb"),  
+                        (0.125, "#00ff00"), 
+                        (0.25, "#10b981"),  
+                        (0.26, "#fca5a5"),  
+                        (1.00, "#450a0a")   
                     ]
 
-                    fig = px.scatter(
-                        rrg_sec, 
-                        x="RS-Ratio", 
-                        y="RS-Momentum", 
-                        color="Heading", 
-                        text="Label", 
-                        size="Alpha_Score", # Grootte = Kracht
-                        height=650,
-                        hover_data=["Kwadrant", "Action", "Distance"],
-                        title=f"<b>SECTOR ROTATIE</b> <br><sup>Focus op 45° (Fel Groen) | Grootte bol = Alpha Score</sup>"
-                    )
-                    
-                    fig.update_traces(
-                        marker=dict(line=dict(width=1, color='black'), opacity=0.9),
-                        textposition='top center',
-                        textfont=dict(size=11, color='darkslategrey', family="Arial Black")
-                    )
-                    
+                    # --- ASSEN BEPALEN ---
+                    if "Value" in sector_profile:
+                        # Novy-Marx Fundamental Map
+                        x_col = "Value_Proxy"
+                        y_col = "Gross_Profitability"
+                        x_title = "Waardering (Book-to-Market Proxy) ➡️ Goedkoper"
+                        y_title = "Kwaliteit (Gross Profitability) ➡️ Winstgevender"
+                        chart_title = "<b>FUNDAMENTAL SECTOR MAP</b> <br><sup>Focus op Rechtsboven (Kwaliteit + Waarde)</sup>"
+                        
+                        fig = px.scatter(
+                            rrg_sec, x=x_col, y=y_col, color="Heading", text="Label", size="Alpha_Score",
+                            height=650, hover_data=["Kwadrant", "Action"], title=chart_title
+                        )
+                        
+                        # Value Focus Area (Rechtsboven)
+                        x_max = rrg_sec[x_col].max() * 1.05
+                        y_max = rrg_sec[y_col].max() * 1.05
+                        med_x = rrg_sec[x_col].median()
+                        med_y = rrg_sec[y_col].median()
+                        
+                        fig.add_shape(type="rect", x0=med_x, y0=med_y, x1=x_max, y1=y_max, 
+                                      fillcolor="gold", opacity=0.1, layer="below", line_width=0)
+                        fig.add_annotation(x=med_x + (x_max-med_x)/2, y=med_y + (y_max-med_y)/2, 
+                                           text="⭐ VALUE & QUALITY", showarrow=False, font=dict(color="goldenrod", size=14))
+                        
+                    else:
+                        # Standaard RRG Map
+                        x_col = "RS-Ratio"
+                        y_col = "RS-Momentum"
+                        x_title = "RS-Ratio (Trend)"
+                        y_title = "RS-Momentum (Snelheid)"
+                        chart_title = "<b>SECTOR ROTATIE (RRG)</b> <br><sup>Focus op 45° (Fel Groen) | Grootte = Alpha</sup>"
+                        
+                        fig = px.scatter(
+                            rrg_sec, x=x_col, y=y_col, color="Heading", text="Label", size="Alpha_Score",
+                            height=650, hover_data=["Kwadrant", "Action", "Distance"], title=chart_title
+                        )
+                        fig.add_hline(y=100); fig.add_vline(x=100)
+                        fig.add_annotation(x=101, y=101, text="LEADING", showarrow=False, font=dict(size=14, color="rgba(0,128,0,0.3)"))
+                        fig.add_annotation(x=99, y=99, text="LAGGING", showarrow=False, font=dict(size=14, color="rgba(255,0,0,0.3)"))
+                        
+                        max_dev = max(abs(rrg_sec['RS-Ratio']-100).max(), abs(rrg_sec['RS-Momentum']-100).max()) * 1.1
+                        fig.update_xaxes(range=[100-max_dev, 100+max_dev])
+                        fig.update_yaxes(range=[100-max_dev, 100+max_dev])
+
+                    # Gedeelde opmaak
+                    fig.update_traces(marker=dict(line=dict(width=1, color='black'), opacity=0.9), textposition='top center', textfont=dict(size=11, color='darkslategrey', family="Arial Black"))
                     fig.update_layout(
-                        coloraxis_cmin=0, coloraxis_cmax=360,
-                        coloraxis_colorscale=custom_color_scale,
-                        coloraxis_colorbar=dict(
-                            title="Richting",
-                            tickvals=[0, 45, 90, 225],
-                            ticktext=["0°", "45° (TOP)", "90°", "SW (Short)"]
-                        ),
-                        template="plotly_white",
-                        xaxis=dict(showgrid=True, zeroline=True, zerolinecolor='black'), 
-                        yaxis=dict(showgrid=True, zeroline=True, zerolinecolor='black'),
+                        xaxis_title=x_title, yaxis_title=y_title, template="plotly_white",
+                        coloraxis_cmin=0, coloraxis_cmax=360, coloraxis_colorscale=custom_color_scale,
+                        coloraxis_colorbar=dict(title="Richting", tickvals=[0, 45, 90, 225], ticktext=["0°", "45° (TOP)", "90°", "SW (Short)"]),
                         margin=dict(t=60, b=40, l=40, r=40)
                     )
-                    
-                    # Watermerken (RGBA fix)
-                    fig.add_annotation(x=101, y=101, text="LEADING", showarrow=False, font=dict(size=14, color="rgba(0,128,0,0.3)"))
-                    fig.add_annotation(x=99, y=99, text="LAGGING", showarrow=False, font=dict(size=14, color="rgba(255,0,0,0.3)"))
-
-                    max_dev = max(abs(rrg_sec['RS-Ratio']-100).max(), abs(rrg_sec['RS-Momentum']-100).max()) * 1.1
-                    fig.update_xaxes(range=[100-max_dev, 100+max_dev])
-                    fig.update_yaxes(range=[100-max_dev, 100+max_dev])
-
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    st.markdown("#### 🏆 Sector Ranking (Alpha Score)")
-                    top_sec = rrg_sec.sort_values('Alpha_Score', ascending=False)
+                    st.markdown("#### 🏆 Sector Ranking")
+                    sort_col = "Gross_Profitability" if "Value" in sector_profile else "Alpha_Score"
+                    top_sec = rrg_sec.sort_values(sort_col, ascending=False)
                     st.dataframe(
-                        top_sec[['Label', 'Alpha_Score', 'Heading', 'Action']].style
-                        .background_gradient(subset=['Alpha_Score'], cmap='Greens')
-                        .format({"Heading": "{:.0f}°", "Alpha_Score": "{:.1f}"}),
-                        hide_index=True,
-                        use_container_width=True
+                        top_sec[['Label', 'Alpha_Score', 'Gross_Profitability', 'Heading', 'Action']].style
+                        .background_gradient(subset=[sort_col], cmap='Greens')
+                        .format({"Heading": "{:.0f}°", "Alpha_Score": "{:.1f}", "Gross_Profitability": "{:.1%}"}),
+                        hide_index=True, use_container_width=True
                     )
                 else: st.warning("Geen sector data.")
             else: st.warning("Geen tickers.")
-
+                
 # === TAB 3: AANDELEN ===
 with tab3:
     if st.session_state.get('active'):
@@ -549,7 +569,6 @@ with tab3:
         current_sec = st.session_state.get('sector_sel', 'Alle Sectoren')
         st.subheader(f"Deep Dive: {current_sec}")
 
-        # --- NIEUW: PROFIEL TOGGLE & DYNAMISCHE LEGENDE ---
         st.markdown("### 🧠 Kies Investeringsprofiel")
         selected_profile = st.radio(
             "Selecteer je RRG strategie:",
@@ -558,31 +577,25 @@ with tab3:
             label_visibility="collapsed"
         )
         
-        # Dynamische uitleg voor de leek (en de pro)
         if selected_profile == "Momentum Profile":
             st.info("""
             **🔥 Hoe lees je deze grafiek? (Momentum Focus)**
-            * **Doel:** Winnaars kopen die nóg harder stijgen. The trend is your friend.
-            * **Waar moet je kijken?** Rechtsboven (Leading) en linksboven (Improving).
-            * **De Legende (Heading):** Zoek naar de **felgroene bollen**. Dit betekent dat het aandeel beweegt in een hoek tussen **0° en 90°** (Noordoost). 
-            * **De Sweet Spot:** Exact **45°** is perfect. Het aandeel wint dan in een perfecte balans aan relatieve trend én momentum ten opzichte van de rest. Vermijd rood (Zuidwest)!
+            * **Doel:** Winnaars kopen die nóg harder stijgen.
+            * **Assen:** Klassieke RRG (RS-Ratio vs RS-Momentum).
+            * **De Legende (Heading):** Zoek naar de **felgroene bollen** (0° tot 90°).
             """)
-            
         elif selected_profile == "Value Profile":
             st.info("""
-            **💎 Hoe lees je deze grafiek? (Value/Turnaround Focus)**
-            * **Doel:** Ondergewaardeerde aandelen (koopjes) vinden die net aan een comeback beginnen én winstgevend zijn.
-            * **Waar moet je kijken?** Linksonder (Lagging) en linksboven (Improving).
-            * **De Legende (Heading):** Zoek naar de **gouden en donkerblauwe bollen**. Dit zijn aandelen die een bodem lijken te hebben gevonden en nu een opwaartse draai maken (tussen **0° en 180°**).
-            * **Belangrijk:** Grijze/dimme bollen negeren we, dat zijn vaak 'value traps' (goedkoop, maar ze blijven zakken).
+            **💎 Hoe lees je deze grafiek? (Value Focus)**
+            * **Doel:** Kwalitatieve bedrijven kopen voor een lage prijs (Novy-Marx methode).
+            * **Assen:** Waardering (Proxy voor Book-to-Market) vs Kwaliteit (Gross Profitability).
+            * **Waar moet je kijken?** Rechtsboven in de *Novy-Marx Premium Zone*. 
             """)
-            
         elif selected_profile == "Balanced (Combo)":
             st.info("""
             **⚖️ Hoe lees je deze grafiek? (Kwaliteit + Trend)**
-            * **Doel:** De 'heilige graal'. Aandelen die fundamenteel kerngezond zijn (hoge winstgevendheid) én momenteel de wind in de zeilen hebben.
-            * **Waar moet je kijken?** De aandelen die vanuit linksboven (Improving) naar rechtsboven (Leading) oversteken.
-            * **De Legende (Heading):** Focus op de **paarse en turquoise bollen**. Dit toont een krachtige, positieve koersrichting (0° tot 90°) gesteund door sterke bedrijfscijfers onder de motorkap.
+            * **Doel:** Kerngezonde bedrijven die nu momentum krijgen.
+            * **Assen:** Klassieke RRG (RS-Ratio vs RS-Momentum), maar we filteren streng op fundamenten.
             """)
         
         st.markdown("---")
@@ -599,9 +612,6 @@ with tab3:
             st.error("Kon geen aandelenlijst ophalen.")
             st.stop()
 
-        # --------------------------
-        # Selecteer subset tickers
-        # --------------------------
         if current_sec != "Alle Sectoren":
             subset = constituents[constituents['Sector'] == current_sec]['Ticker'].tolist()
         else:
@@ -609,9 +619,6 @@ with tab3:
 
         dl_list = list(set(subset + [bench_ticker]))
 
-        # --------------------------
-        # Data ophalen (historisch of live)
-        # --------------------------
         with st.spinner(f"Koersdata & Factoren ophalen voor {len(dl_list)} aandelen..."):
             if use_historical:
                 df_stocks = get_price_data(dl_list, end_date=str(selected_date))
@@ -622,14 +629,8 @@ with tab3:
             st.warning("Onvoldoende koersdata.")
             st.stop()
 
-        # --------------------------
-        # RRG berekenen MÉT gekozen profiel
-        # --------------------------
         rrg_stocks = calculate_rrg_extended(
-            df_stocks,
-            bench_ticker,
-            market_bullish=market_bull_flag,
-            profile=selected_profile
+            df_stocks, bench_ticker, market_bullish=market_bull_flag, profile=selected_profile
         )
 
         if rrg_stocks.empty:
@@ -640,138 +641,93 @@ with tab3:
         rrg_stocks = rrg_stocks[rrg_stocks['Distance'] > 0]
         st.session_state['rrg_stocks_data'] = rrg_stocks
 
-        # ================================
-        # VISUALISATIE
-        # ================================
         col1, col2 = st.columns([3, 1])
 
+        # ================================
+        # VISUALISATIE (DYNAMISCHE ASSEN)
+        # ================================
         with col1:
-            # Dynamische kleurenschaal op basis van profiel
             if selected_profile == "Momentum Profile":
-                colorscale = [
-                    (0.00, "#e5e7eb"),  # Grijs
-                    (0.125, "#00ff00"), # Felgroen (0-90 momentum focus)
-                    (0.25, "#10b981"),  # Smaragd
-                    (0.50, "#fca5a5"),  # Rood/Roze (Zuid)
-                    (1.00, "#450a0a")   # Donkerrood
-                ]
+                colorscale = [(0.0, "#e5e7eb"), (0.125, "#00ff00"), (0.25, "#10b981"), (0.5, "#fca5a5"), (1.0, "#450a0a")]
+                x_col, y_col = "RS-Ratio", "RS-Momentum"
+                x_axis_title, y_axis_title = "RS-Ratio (Trend)", "RS-Momentum (Snelheid)"
             elif selected_profile == "Value Profile":
-                colorscale = [
-                    (0.00, "#e5e7eb"),  # Grijs
-                    (0.125, "#ffd700"), # Goud (Turnaround / Value)
-                    (0.25, "#4169e1"),  # Royal Blue (Kwaliteit)
-                    (0.50, "#d3d3d3"),  # Lichtgrijs
-                    (1.00, "#696969")   # Dim grijs (Value traps genegeerd)
-                ]
-            else: # Balanced
-                colorscale = [
-                    (0.00, "#e5e7eb"),
-                    (0.125, "#8a2be2"), # Purple (Combo)
-                    (0.25, "#00ced1"),  # Dark Turquoise
-                    (0.50, "#ffb6c1"),  # Light pink
-                    (1.00, "#8b0000")   # Dark red
-                ]
+                colorscale = [(0.0, "#e5e7eb"), (0.125, "#ffd700"), (0.25, "#4169e1"), (0.5, "#d3d3d3"), (1.0, "#696969")]
+                x_col, y_col = "Value_Proxy", "Gross_Profitability"
+                x_axis_title, y_axis_title = "Waardering (Book-to-Market Proxy)", "Kwaliteit (Gross Profitability)"
+            else:
+                colorscale = [(0.0, "#e5e7eb"), (0.125, "#8a2be2"), (0.25, "#00ced1"), (0.5, "#ffb6c1"), (1.0, "#8b0000")]
+                x_col, y_col = "RS-Ratio", "RS-Momentum"
+                x_axis_title, y_axis_title = "RS-Ratio", "RS-Momentum"
 
             fig2 = px.scatter(
-                rrg_stocks,
-                x="RS-Ratio",
-                y="RS-Momentum",
-                color="Heading",
-                text="Ticker",
-                size="Alpha_Score",
-                height=700,
-                hover_data=["Kwadrant", "Action", "Gross_Profitability"],
-                title=f"<b>RRG SIGNAL: {current_sec} | {selected_profile}</b>"
+                rrg_stocks, x=x_col, y=y_col, color="Heading", text="Ticker", size="Alpha_Score",
+                height=700, hover_data=["Kwadrant", "Action", "Gross_Profitability", "Value_Proxy"],
+                title=f"<b>SIGNAL MAP: {current_sec} | {selected_profile}</b>"
             )
 
-            fig2.update_traces(
-                marker=dict(line=dict(width=1, color='black'), opacity=0.85),
-                textposition='top center'
-            )
-
+            fig2.update_traces(marker=dict(line=dict(width=1, color='black'), opacity=0.85), textposition='top center')
             fig2.update_layout(
-                coloraxis_cmin=0, coloraxis_cmax=360,
-                coloraxis_colorscale=colorscale,
+                coloraxis_cmin=0, coloraxis_cmax=360, coloraxis_colorscale=colorscale,
                 coloraxis_colorbar=dict(title="Richting (Graden)"),
-                template="plotly_white"
+                xaxis_title=x_axis_title, yaxis_title=y_axis_title, template="plotly_white"
             )
 
-            fig2.add_hline(y=100)
-            fig2.add_vline(x=100)
-
-            max_dev = max(
-                abs(rrg_stocks['RS-Ratio'] - 100).max(),
-                abs(rrg_stocks['RS-Momentum'] - 100).max()
-            ) * 1.1
-
-            fig2.update_xaxes(range=[100 - max_dev, 100 + max_dev])
-            fig2.update_yaxes(range=[100 - max_dev, 100 + max_dev])
-
-            # Watermerken afhankelijk van profiel focus
-            if selected_profile == "Momentum Profile":
-                fig2.add_annotation(x=100 + (max_dev*0.8), y=100 + (max_dev*0.8), text="FOCUS AREA", showarrow=False, font=dict(size=16, color="rgba(0,255,0,0.2)"))
-            elif selected_profile == "Value Profile":
-                fig2.add_annotation(x=100 - (max_dev*0.8), y=100 + (max_dev*0.8), text="TURNAROUND FOCUS", showarrow=False, font=dict(size=16, color="rgba(255,215,0,0.3)"))
+            if selected_profile == "Value Profile":
+                med_x, med_y = rrg_stocks[x_col].median(), rrg_stocks[y_col].median()
+                fig2.add_hline(y=med_y, line_dash="dot", line_color="gray")
+                fig2.add_vline(x=med_x, line_dash="dot", line_color="gray")
+                fig2.add_annotation(x=rrg_stocks[x_col].max()*0.95, y=rrg_stocks[y_col].max()*0.95, 
+                                    text="NOVY-MARX PREMIUM", showarrow=False, font=dict(size=14, color="rgba(255,215,0,0.5)"))
+            else:
+                fig2.add_hline(y=100); fig2.add_vline(x=100)
+                max_dev = max(abs(rrg_stocks['RS-Ratio'] - 100).max(), abs(rrg_stocks['RS-Momentum'] - 100).max()) * 1.1
+                fig2.update_xaxes(range=[100 - max_dev, 100 + max_dev])
+                fig2.update_yaxes(range=[100 - max_dev, 100 + max_dev])
 
             st.plotly_chart(fig2, use_container_width=True)
 
         # ================================
-        # ALPHA PICKS
+        # ALPHA PICKS (DYNAMISCHE TABEL)
         # ================================
         with col2:
             st.markdown("### 🎯 Alpha Picks")
 
-            # Harde logische filters op basis van profiel
             if selected_profile == "Momentum Profile":
                 filtered_stocks = rrg_stocks[rrg_stocks['Kwadrant'].str.contains("1. LEADING|4. IMPROVING")]
                 display_cols = ['Ticker', 'Alpha_Score', 'RS-Momentum', 'Action']
                 sort_col = "Alpha_Score"
-                
             elif selected_profile == "Value Profile":
                 filtered_stocks = rrg_stocks[rrg_stocks['Kwadrant'].str.contains("3. LAGGING|4. IMPROVING")]
                 display_cols = ['Ticker', 'Heading', 'Gross_Profitability', 'Action']
-                sort_col = "Gross_Profitability" # Sorteer op kwaliteit voor value
-                
-            else: # Balanced
+                sort_col = "Gross_Profitability"
+            else: 
                 filtered_stocks = rrg_stocks
                 display_cols = ['Ticker', 'Alpha_Score', 'Gross_Profitability', 'Action']
                 sort_col = "Alpha_Score"
 
-            # Filter op expliciete koop signalen (BUY of SPEC BUY)
-            top_picks = filtered_stocks[
-                filtered_stocks['Action'].str.contains("BUY")
-            ].sort_values(sort_col, ascending=False).head(15)
+            top_picks = filtered_stocks[filtered_stocks['Action'].str.contains("BUY")].sort_values(sort_col, ascending=False).head(15)
 
             if top_picks.empty:
                 st.info("Geen sterke signalen gevonden voor dit profiel.")
             else:
-                # Dynamische opmaak afhankelijk van welke kolommen in de lijst zitten
                 format_dict = {}
-                if "Alpha_Score" in display_cols:
-                    format_dict["Alpha_Score"] = "{:.1f}"
-                if "Gross_Profitability" in display_cols:
-                    format_dict["Gross_Profitability"] = "{:.1%}"
-                if "Heading" in display_cols:
-                    format_dict["Heading"] = "{:.0f}°"
-                if "RS-Momentum" in display_cols:
-                    format_dict["RS-Momentum"] = "{:.1f}"
+                if "Alpha_Score" in display_cols: format_dict["Alpha_Score"] = "{:.1f}"
+                if "Gross_Profitability" in display_cols: format_dict["Gross_Profitability"] = "{:.1%}"
+                if "Heading" in display_cols: format_dict["Heading"] = "{:.0f}°"
+                if "RS-Momentum" in display_cols: format_dict["RS-Momentum"] = "{:.1f}"
 
                 st.dataframe(
-                    top_picks[display_cols]
-                    .style.background_gradient(subset=[sort_col], cmap='Greens')
-                    .format(format_dict),
-                    hide_index=True,
-                    use_container_width=True,
-                    height=450
+                    top_picks[display_cols].style.background_gradient(subset=[sort_col], cmap='Greens').format(format_dict),
+                    hide_index=True, use_container_width=True, height=450
                 )
+
         # =====================================================
-        # 📈 FORWARD PERFORMANCE (ALLEEN IN HISTORISCHE MODE)
+        # FORWARD PERFORMANCE (ALLEEN IN HISTORISCHE MODE)
         # =====================================================
         if use_historical:
-
             st.markdown("---")
             st.markdown("## 📈 Forward Performance Analyse")
-
             future_df = get_price_data(rrg_stocks['Ticker'].tolist())
             perf_data = []
 
@@ -780,42 +736,20 @@ with tab3:
                     price_then = df_stocks[ticker].iloc[-1]
                     price_now = future_df[ticker].iloc[-1]
                     return_pct = ((price_now / price_then) - 1) * 100
-
                     perf_data.append({
                         "Ticker": ticker,
-                        "Alpha_Score": rrg_stocks.loc[
-                            rrg_stocks['Ticker'] == ticker,
-                            'Alpha_Score'
-                        ].values[0],
+                        "Alpha_Score": rrg_stocks.loc[rrg_stocks['Ticker'] == ticker, 'Alpha_Score'].values[0],
                         "Return (%)": return_pct
                     })
-                except:
-                    continue
+                except: continue
 
             perf_df = pd.DataFrame(perf_data)
-
             if not perf_df.empty:
                 correlation = perf_df["Alpha_Score"].corr(perf_df["Return (%)"])
-
-                st.metric(
-                    "📊 Correlatie Alpha vs Return",
-                    f"{correlation:.2f}"
-                )
-
-                fig_perf = px.scatter(
-                    perf_df,
-                    x="Alpha_Score",
-                    y="Return (%)",
-                    text="Ticker",
-                    title="Alpha Score vs Forward Return"
-                )
-
+                st.metric("📊 Correlatie Alpha vs Return", f"{correlation:.2f}")
+                fig_perf = px.scatter(perf_df, x="Alpha_Score", y="Return (%)", text="Ticker", title="Alpha Score vs Forward Return")
                 st.plotly_chart(fig_perf, use_container_width=True)
-
-                st.dataframe(
-                    perf_df.sort_values("Return (%)", ascending=False),
-                    use_container_width=True
-                )
+                st.dataframe(perf_df.sort_values("Return (%)", ascending=False), use_container_width=True)
 # === TAB 4: AI ANALYST ===
 with tab4:
     st.header("🧠 Quant AI Prompt")
