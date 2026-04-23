@@ -108,22 +108,26 @@ def get_market_constituents(market_key):
         return pd.DataFrame(list(fallback_data.items()), columns=['Ticker', 'Sector'])
 
 @st.cache_data(ttl=3600)
-def get_price_data(tickers, end_date=None):
+def get_price_data(tickers: tuple, end_date=None):
     if not tickers:
         return pd.DataFrame()
+
+    # FIX: YFinance heeft een lijst nodig, Streamlit Cache eist een tuple. 
+    # We zetten de tuple hier tijdelijk om naar een lijst voor YFinance.
+    ticker_list = list(tickers)
 
     try:
         if end_date:
             data = yf.download(
-                tickers,
-                start="2024-01-01",  # ruim genoeg historisch
+                ticker_list,
+                start="2024-01-01", 
                 end=end_date,
                 progress=False,
                 auto_adjust=True
             )
         else:
             data = yf.download(
-                tickers,
+                ticker_list,
                 period="2y",
                 progress=False,
                 auto_adjust=True
@@ -137,13 +141,14 @@ def get_price_data(tickers, end_date=None):
 
         if isinstance(data, pd.Series):
             data = data.to_frame()
-            data.columns = tickers
+            data.columns = ticker_list
 
-        return data
+        # Architecturale bescherming tegen NaN waardes bij feestdagen:
+        return data.ffill().bfill()
 
-    except:
+    except Exception as e:
+        print(f"Data fetch error: {e}")
         return pd.DataFrame()
-
 # --- HELPER FUNCTIES VOOR INSTITUTIONELE ALPHA ---
 
 def denoise_covariance(returns, q, variance=1):
@@ -400,7 +405,7 @@ if sel_sector != "Alle Sectoren" and "USA" in sel_market_key:
     
     if sec_ticker:
         # Haal data op voor de sector tracker (bijv. XLK)
-        sec_df = get_price_data([sec_ticker])
+        sec_df = get_price_data(tuple([sec_ticker]))
         
         if not sec_df.empty:
             s_sec = sec_df.iloc[:, 0]
@@ -475,7 +480,7 @@ with tab2:
 
             if tickers:
                 calc_tickers = list(set(tickers + [market_cfg['benchmark']]))
-                df_sec = get_price_data(calc_tickers)
+                df_sec = get_price_data(tuple(calc_tickers))
                 
                 # Bepaal profiel string voor de berekening
                 prof_str = "Value Profile" if "Value" in sector_profile else "Momentum Profile"
@@ -686,9 +691,9 @@ with tab3:
 
         with st.spinner(f"Koersdata & Factoren ophalen voor {len(dl_list)} aandelen..."):
             if use_historical:
-                df_stocks = get_price_data(dl_list, end_date=str(selected_date))
+               df_stocks = get_price_data(tuple(dl_list), end_date=str(selected_date))
             else:
-                df_stocks = get_price_data(dl_list)
+                df_stocks = get_price_data(tuple(dl_list))
 
         if df_stocks.empty:
             st.warning("Onvoldoende koersdata.")
