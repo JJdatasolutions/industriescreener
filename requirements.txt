@@ -1,13 +1,17 @@
+# --- Presentatie & Interface (De buitenkant) ---
 streamlit
-yfinance
-pandas
 plotly
-google-generativeai
-requests
+
+# --- Data & Rekenkracht (De motor) ---
+pandas
 numpy
-lxml
-openpyxl
-matplotlib
+scipy
 scikit-learn
 statsmodels
-scipy
+
+# --- Externe Verbindingen (De stekkertjes) ---
+yfinance
+httpx
+beautifulsoup4
+lxml
+google-genai
