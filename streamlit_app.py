@@ -13,23 +13,61 @@ warnings.filterwarnings("ignore")
 # --- CONFIGURATIE ---
 st.set_page_config(page_title="Hedge Fund Screener 9.0 (Quant Edition)", layout="wide", page_icon="📈")
 
-# --- 1. DATA LAAG (LAZY LOADING & CACHING) ---
+# --- 1. DATA LAAG (LAZY LOADING, CACHING & GRACEFUL DEGRADATION) ---
+
 @st.cache_data(ttl=3600)
 def fetch_market_data(tickers: List[str], period: str = "1y") -> pd.DataFrame:
-    """Haalt historische koersen op in bulk (Snel en efficiënt)."""
+    """Haalt historische koersen op met robuuste foutafhandeling en simulatie-terugval."""
     try:
-        # Download in bulk om yfinance API limieten te respecteren
-        data = yf.download(tickers, period=period, progress=False)['Adj Close']
-        return data.ffill().dropna(axis=1, how='all')
+        # Download de data in bulk om de API niet te overbelasten
+        data = yf.download(tickers, period=period, progress=False)
+        
+        # Controleer of de dataset leeg is (Voorkomt de beruchte 'Adj Close' fout)
+        if data.empty:
+            raise ValueError("Yahoo Finance weigerde de verbinding of gaf een lege dataset terug.")
+        
+        # Dynamisch de juiste prijskolom bepalen (ondersteunt zowel oude als nieuwe yfinance versies)
+        if isinstance(data.columns, pd.MultiIndex):
+            if 'Adj Close' in data.columns.levels[0]:
+                price_data = data['Adj Close']
+            elif 'Close' in data.columns.levels[0]:
+                price_data = data['Close']
+            else:
+                price_data = data
+        else:
+            if 'Adj Close' in data:
+                price_data = data['Adj Close']
+            elif 'Close' in data:
+                price_data = data['Close']
+            else:
+                price_data = data
+
+        # Forceer naar een correct tabel-formaat als er maar 1 aandeel overblijft
+        if isinstance(price_data, pd.Series):
+            price_data = price_data.to_frame(name=tickers[0])
+            
+        return price_data.ffill().dropna(axis=1, how='all')
+        
     except Exception as e:
-        st.error(f"Data ophaalfout: {e}")
-        return pd.DataFrame()
+        # VANGNET: Als Yahoo faalt, valt het systeem wiskundig terug op Monte Carlo simulaties.
+        st.warning(f"⚠️ Live datastroom tijdelijk onderbroken ({e}). Systeem draait op Monte Carlo simulatie.")
+        
+        np.random.seed(42)
+        days = 252 # Aantal handelsdagen in 1 jaar
+        dates = pd.date_range(end=pd.Timestamp.now(), periods=days, freq='B')
+        
+        simulated_data = {}
+        for t in tickers:
+            # Wiskundige Random Walk simulatie
+            simulated_data[t] = 100 * np.exp(np.cumsum(np.random.normal(0, 0.015, days)))
+            
+        return pd.DataFrame(simulated_data, index=dates)
 
 @st.cache_data(ttl=86400)
 def fetch_fundamentals(ticker: str) -> Dict[str, float]:
     """
-    Live Fundamental Ingestion (Novy-Marx & Fama-French).
-    Lazy-loaded om IP-bans te voorkomen.
+    Live Fundamental Ingestion.
+    Wordt 'lazy' (pas op het laatste moment) geladen om IP-blokkades te voorkomen.
     """
     try:
         info = yf.Ticker(ticker).info
@@ -44,10 +82,10 @@ def fetch_fundamentals(ticker: str) -> Dict[str, float]:
     except Exception:
         return {"GP_A": np.nan, "P_B": np.nan}
 
-# --- 2. QUANT MATHEMATICS LAAG ---
+# --- 2. QUANT MATHEMATICS LAAG (REKENKERN) ---
 
 def calc_rrg(price_df: pd.DataFrame, benchmark: pd.Series, window: int = 14) -> pd.DataFrame:
-    """Berekent wiskundige RRG coördinaten."""
+    """Berekent wiskundige Relative Rotation Graph coördinaten."""
     results = []
     for col in price_df.columns:
         if col == benchmark.name: continue
@@ -66,8 +104,8 @@ def calc_rrg(price_df: pd.DataFrame, benchmark: pd.Series, window: int = 14) -> 
 
 def apply_faber_logic(current_ranks: pd.Series, prev_ranks: pd.Series) -> pd.Series:
     """
-    Implementatie van Faber's Turnover Reductie Hysterese.
-    Koop Top 3. Houd vast zolang in Top 5. Anders Verkoop.
+    Faber's Turnover Reductie Hysterese. 
+    Helpt om transactiekosten (Technical Debt in trading) te minimaliseren.
     """
     status = []
     for ticker in current_ranks.index:
@@ -90,7 +128,7 @@ def main() -> None:
     st.title("📈 Hedge Fund Quant Terminal 9.0")
     st.markdown("Integratie van Novy-Marx Profitability, Phase Space Attractors en Dorsey Wright.")
     
-    # Simuleer een universum voor de demonstratie om laadtijden te besparen
+    # Een stabiel, vast universum voor de demonstratie
     sector_map = {
         "AAPL": "Tech", "MSFT": "Tech", "NVDA": "Tech", 
         "JPM": "Fin", "BAC": "Fin", "GS": "Fin",
@@ -108,6 +146,7 @@ def main() -> None:
     benchmark = df_prices['SPY']
     universe = df_prices.drop(columns=['SPY'])
     
+    # De 4 Professionele Tabbladen
     tab1, tab2, tab3, tab4 = st.tabs([
         "🌐 Macro & Correlatie", "🔥 Dorsey Wright RS Matrix", 
         "🔬 Deep Dive & Phase Space", "🤖 AI Analist"
@@ -118,7 +157,6 @@ def main() -> None:
         col1, col2 = st.columns(2)
         
         with col1:
-            # RRG (Huidige snapshot)
             rrg_df = calc_rrg(universe, benchmark)
             rrg_df['Sector'] = rrg_df['Ticker'].map(sector_map)
             
@@ -129,8 +167,8 @@ def main() -> None:
             fig_rrg.add_hline(y=100, line_dash="dash"); fig_rrg.add_vline(x=100, line_dash="dash")
             st.plotly_chart(fig_rrg, use_container_width=True)
             
+            
         with col2:
-            # Correlatie Matrix
             returns = universe.pct_change().dropna()
             corr_matrix = returns.corr()
             
@@ -139,13 +177,12 @@ def main() -> None:
                 title="Correlatie Heatmap (Dispersie Check)"
             )
             st.plotly_chart(fig_corr, use_container_width=True)
-            st.caption("Lage correlatie (blauw/wit) is noodzakelijk voor succesvolle sectorrotatie.")
+            st.caption("In mensentaal: Lage correlatie (blauw/wit) betekent dat aandelen hun eigen weg gaan. Dit is noodzakelijk voor succesvolle sectorrotatie.")
 
     with tab2:
         st.header("Dorsey Wright Relative Strength Matrix")
-        st.write("Head-to-head P&F vergelijking (gesimuleerd op basis van RS ratio's).")
+        st.write("Head-to-head vergelijking (welk aandeel is sterker dan het andere?).")
         
-        # Simpele Head-to-Head win-matrix gebaseerd op 6-maands rendement
         perf_6m = (universe.iloc[-1] / universe.iloc[-126]) - 1
         matrix = pd.DataFrame(index=perf_6m.index, columns=perf_6m.index)
         
@@ -157,7 +194,6 @@ def main() -> None:
         matrix['Wins'] = matrix.sum(axis=1)
         matrix = matrix.sort_values(by='Wins', ascending=False)
         
-        # Faber Logic Toepassen (Vergelijk huidige ranking met ranking 1 maand geleden)
         perf_7m_to_1m = (universe.iloc[-21] / universe.iloc[-147]) - 1
         prev_rank = perf_7m_to_1m.rank(ascending=False)
         curr_rank = perf_6m.rank(ascending=False)
@@ -165,10 +201,10 @@ def main() -> None:
         portfolio_status = apply_faber_logic(curr_rank, prev_rank)
         
         display_df = pd.DataFrame({
-            "6M Return": (perf_6m * 100).round(2).astype(str) + "%",
-            "Matrix Wins": matrix['Wins'],
+            "6 Maands Rendement": (perf_6m * 100).round(2).astype(str) + "%",
+            "Matrix Overwinningen": matrix['Wins'],
             "Portfolio Status (Faber)": portfolio_status
-        }).sort_values(by="Matrix Wins", ascending=False)
+        }).sort_values(by="Matrix Overwinningen", ascending=False)
         
         st.dataframe(display_df, use_container_width=True)
 
@@ -181,15 +217,14 @@ def main() -> None:
             funds = fetch_fundamentals(selected_stock)
             
         m1, m2 = st.columns(2)
-        m1.metric("Gross Profitability (GP/A)", f"{funds['GP_A']:.4f}" if not pd.isna(funds['GP_A']) else "N/B", 
+        m1.metric("Gross Profitability (GP/A)", f"{funds['GP_A']:.4f}" if not pd.isna(funds['GP_A']) else "Niet Beschikbaar", 
                   help="Hoge GP/A wijst op kwaliteitsbedrijven (Novy-Marx).")
-        m2.metric("Price-to-Book (P/B)", f"{funds['P_B']:.2f}" if not pd.isna(funds['P_B']) else "N/B", 
+        m2.metric("Price-to-Book (P/B)", f"{funds['P_B']:.2f}" if not pd.isna(funds['P_B']) else "Niet Beschikbaar", 
                   help="Waardering ten opzichte van boekwaarde (Fama-French).")
         
         st.subheader("2. Phase Space Attractor (Chaostheorie)")
-        tau = st.slider("Time Delay ($\tau$ in dagen)", 1, 20, 5)
+        tau = st.slider("Time Delay (Dagen in het verleden)", 1, 20, 5)
         
-        # Phase Space Berekening (r(t) vs r(t-tau))
         daily_ret = returns[selected_stock]
         delayed_ret = daily_ret.shift(tau)
         
@@ -197,11 +232,12 @@ def main() -> None:
         
         fig_phase = px.scatter(
             phase_df, x='r_t_tau', y='r_t', opacity=0.5,
-            title=f"Phase Space Plot: $r(t)$ vs $r(t-{tau})$",
-            labels={'r_t_tau': f'Return T-{tau}', 'r_t': 'Return T'}
+            title=f"Phase Space Plot: Rendement Vandaag vs Rendement {-tau} Dagen Geleden",
+            labels={'r_t_tau': f'Rendement T-{tau}', 'r_t': 'Rendement Vandaag'}
         )
         st.plotly_chart(fig_phase, use_container_width=True)
-        st.caption("Concentreert de wolk zich in een ellips? Dan is er sprake van een stable-focus (trend). Is het een perfecte cirkel of random verdeeld? Dan heerst er aperiodieke chaos.")
+        
+        st.caption("In mensentaal: Concentreert de puntenwolk zich in een schuine sigaar-vorm? Dan zit er een voorspelbare trend in het aandeel. Is het een perfecte, willekeurige bolkraam? Dan heerst er pure chaos en kun je beter wegblijven.")
 
     with tab4:
         st.header("AI Analyst 2.0 (Deep Research)")
@@ -212,16 +248,16 @@ def main() -> None:
 JULLIE OPDRACHT:
 
 1. FUNDAMENTELE AUDIT (Novy-Marx & Value):
-De huidige Gross Profitability (GP/A) is {funds['GP_A']:.4f} en de P/B ratio is {funds['P_B']:.2f}. Beoordeel dit profiel ten opzichte van sector-gemiddelden. Is dit een value trap of een high-quality compounder?
+De huidige Gross Profitability (GP/A) is {funds['GP_A']:.4f} en de P/B ratio is {funds['P_B']:.2f}. Beoordeel dit profiel ten opzichte van sector-gemiddelden. Is dit een 'value trap' of een high-quality aandeel?
 
 2. KINETICA & CHAOS (Huffaker):
-De Phase Space Attractor toont de correlatie tussen r(t) en r(t-{tau}). Analyseer of de huidige marktfase van dit aandeel convergeert (stable trend) of fragmenteert (chaos).
+De Phase Space Attractor toont de correlatie tussen het rendement van vandaag en {tau} dagen geleden. Analyseer of de huidige marktfase van dit aandeel een stabiele trend vertoont of dat het chaotisch gedrag is.
 
 3. PORTFOLIO MANAGEMENT (Faber & Dorsey Wright):
-Dit aandeel heeft de status: '{portfolio_status[selected_stock]}'. De actuele correlatie met de brede markt is {corr_matrix.loc[selected_stock, 'SPY']:.2f}. 
-Bepaal de optimale positiegrootte. Als de correlatie hoog is en de dispersie laag, adviseer dan om de positie te verkleinen.
+Dit aandeel heeft de status: '{portfolio_status[selected_stock]}'. De actuele correlatie met de brede markt (SPY) is {corr_matrix.loc[selected_stock, 'SPY']:.2f}. 
+Bepaal de optimale positiegrootte. Als de correlatie extreem hoog is en de sector dispersie laag, adviseer dan om de positie te verkleinen wegens gebrek aan diversificatie.
             """
-            st.text_area("Kopieer deze data-gedreven prompt naar je LLM:", prompt, height=350)
+            st.text_area("Kopieer deze data-gedreven prompt naar je favoriete LLM:", prompt, height=350)
 
 if __name__ == "__main__":
     main()
