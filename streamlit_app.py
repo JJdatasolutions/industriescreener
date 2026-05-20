@@ -1,238 +1,207 @@
 import io
 import math
 import warnings
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import requests
 import streamlit as st
 
-# Onderdruk waarschuwingen voor stationariteitstests om de console schoon te houden
+# Onderdruk waarschuwingen
 warnings.filterwarnings("ignore")
 
 # --- CONFIGURATIE ---
-st.set_page_config(page_title="Pro Market Screener 7.5 (Sector Edition)", layout="wide", page_icon="🧠")
+st.set_page_config(page_title="Pro Market Screener 8.0 (RRG & Sector Flow)", layout="wide", page_icon="🧠")
 
-# --- 1. DATA DEFINITIES (Europa is verwijderd) ---
 MARKETS: Dict[str, Dict[str, Any]] = {
     "🇺🇸 USA - S&P 500": {
         "code": "SP500", "benchmark": "SPY", 
         "wiki": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    },
-    "🇺🇸 USA - S&P 400 (MidCap)": {
-        "code": "SP400", "benchmark": "MDY", 
-        "wiki": "https://en.wikipedia.org/wiki/List_of_S%26P_400_companies"
     }
 }
 
-# --- 2. DATA INGESTIE LAAG ---
+# --- 1. DATA INGESTIE LAAG ---
 
-def _fetch_wikipedia_data(url: str) -> pd.DataFrame:
-    """Haat live aandelengegevens op van Wikipedia met de juiste headers en buffers."""
-    if not url:
-        return pd.DataFrame()
+@st.cache_data(ttl=86400)
+def get_market_constituents(market_key: str) -> pd.DataFrame:
+    mkt = MARKETS.get(market_key, {})
+    url = mkt.get('wiki', '')
+    
+    if not url: return pd.DataFrame()
         
-    headers = {"User-Agent": "ProMarketScreenerBot/1.0 (Contact: info@enterprise-trading.com)"}
+    headers = {"User-Agent": "ProMarketBot/2.0 (Contact: info@enterprise.com)"}
     try:
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
+        tables = pd.read_html(io.StringIO(response.text))
         
-        html_buffer = io.StringIO(response.text)
-        tables = pd.read_html(html_buffer)
-        
-        target_df = pd.DataFrame()
-        for df in tables:
-            cols = [str(c).lower() for c in df.columns]
-            if any("symbol" in c for c in cols) and any("sector" in c for c in cols):
-                target_df = df
-                break
-                
-        if target_df.empty:
-            raise ValueError("Geen geschikte tabel gevonden op Wikipedia.")
-            
+        target_df = next(df for df in tables if any("symbol" in str(c).lower() for c in df.columns))
         ticker_col = next(c for c in target_df.columns if "Symbol" in str(c) or "Ticker" in str(c))
         sector_col = next(c for c in target_df.columns if "Sector" in str(c))
         
         df_clean = target_df[[ticker_col, sector_col]].copy()
         df_clean.columns = ['Ticker', 'Sector']
         df_clean['Ticker'] = df_clean['Ticker'].str.replace('.', '-', regex=False)
-        df_clean['Sector'] = df_clean['Sector'].astype(str).str.strip()
-        
         return df_clean
-    except Exception as e:
-        st.error(f"Fout bij ophalen live data: {e}")
-        return _get_fallback_data()
+    except Exception:
+        return pd.DataFrame([
+            ("AAPL", "Technology"), ("MSFT", "Technology"), ("JNJ", "Healthcare"),
+            ("JPM", "Financials"), ("XOM", "Energy"), ("PG", "Consumer Staples")
+        ], columns=['Ticker', 'Sector'])
 
-def _get_fallback_data() -> pd.DataFrame:
-    """Vangnet met basisdata als Wikipedia niet bereikbaar is."""
-    static_data = {
-        "AAPL": "Technology", "MSFT": "Technology", "NVDA": "Technology",
-        "AMZN": "Consumer Discretionary", "GOOGL": "Communication Services",
-        "XOM": "Energy", "JPM": "Financials", "JNJ": "Healthcare"
-    }
-    return pd.DataFrame(list(static_data.items()), columns=['Ticker', 'Sector'])
+# --- 2. QUANT ENGINE (REKENKERN) ---
 
-@st.cache_data(ttl=86400)
-def get_market_constituents(market_key: str) -> pd.DataFrame:
-    """Haalt de lijst van aandelen op via Pattern Matching."""
-    mkt = MARKETS.get(market_key, {})
-    market_code = mkt.get("code", "")
-    
-    match market_code:
-        case "SP500" | "SP400":
-            return _fetch_wikipedia_data(mkt.get('wiki', ''))
-        case _:
-            return pd.DataFrame(columns=['Ticker', 'Sector'])
-
-# --- 3. QUANT ENGINE (REKENKERN) ---
-
-def generate_financial_metrics(tickers: List[str], window: int = 50) -> pd.DataFrame:
-    """
-    Simuleert historische koersen en berekent technische/fundamentele metrieken.
-    Berekening van gecombineerde scores gebeurt via een gewogen matrix:
-    $$\text{Combo Score} = (\text{Momentum} \times 0.5) + (\text{Value} \times 0.5)$$
-    """
+@st.cache_data(ttl=3600)
+def generate_market_simulation(tickers: List[str], sectors: List[str], days: int = 100) -> Tuple[pd.DataFrame, pd.Series]:
+    """Genereert realistische historische data voor de RRG berekening."""
     np.random.seed(42)
-    days = 150
     dates = pd.date_range(end=pd.Timestamp.now(), periods=days)
     
-    # Genereer koersdata (Random Walk)
-    price_matrix = np.random.randn(days, len(tickers)).cumsum(axis=0) + 100
-    df_prices = pd.DataFrame(price_matrix, index=dates, columns=tickers)
+    # We voegen een sector-bias toe zodat sectoren realistisch groeperen
+    sector_biases = {sector: np.random.uniform(-0.5, 0.5) for sector in set(sectors)}
     
+    price_data = {}
+    for t, s in zip(tickers, sectors):
+        # Random walk met een drift gebaseerd op de sector
+        drift = sector_biases[s] + np.random.uniform(-0.2, 0.2)
+        daily_returns = np.random.normal(loc=drift, scale=2.0, size=days)
+        price_data[t] = 100 * np.exp(np.cumsum(daily_returns / 100))
+        
+    df_prices = pd.DataFrame(price_data, index=dates)
+    
+    # Benchmark (S&P 500 simulatie) is het gemiddelde van alles
+    benchmark = df_prices.mean(axis=1)
+    
+    return df_prices, benchmark
+
+def calculate_rrg(price_df: pd.DataFrame, benchmark: pd.Series, window: int = 14) -> pd.DataFrame:
+    """Berekent de wiskundige RRG coördinaten."""
     results = []
-    for ticker in tickers:
-        series = df_prices[ticker]
-        current_price = series.iloc[-1]
+    for col in price_df.columns:
+        # Relatieve Sterkte
+        rs = (price_df[col] / benchmark) * 100
+        rs_ratio = rs.rolling(window=window).mean()
+        # Momentum van die relatieve sterkte
+        rs_momentum = rs_ratio.pct_change(periods=5) * 100 + 100
         
-        # Bereken SMA50
-        sma50 = series.rolling(window=window).mean().iloc[-1]
-        perf_vs_sma50 = ((current_price - sma50) / sma50) * 100
-        
-        # Simuleer scores tussen 0 en 100 voor de views
-        momentum_score = np.clip(perf_vs_sma50 * 5 + 50 + np.random.randint(-15, 15), 0, 100)
-        value_score = np.clip(100 - (momentum_score * 0.4) + np.random.randint(-20, 20), 0, 100)
-        combo_score = (momentum_score * 0.5) + (value_score * 0.5)
-        
-        results.append({
-            "Ticker": ticker,
-            "Current_Price": round(current_price, 2),
-            "SMA50": round(sma50, 2),
-            "Perf_vs_SMA50_%": round(perf_vs_sma50, 2),
-            "Momentum_Score": round(momentum_score, 1),
-            "Value_Score": round(value_score, 1),
-            "Combo_Score": round(combo_score, 1)
-        })
-        
+        if not math.isnan(rs_ratio.iloc[-1]):
+            x, y = rs_ratio.iloc[-1], rs_momentum.iloc[-1]
+            
+            # Bepaal Kwadrant
+            if x >= 100 and y >= 100: quad = "Leading (Leidend)"
+            elif x >= 100 and y < 100: quad = "Weakening (Verzwakkend)"
+            elif x < 100 and y < 100: quad = "Lagging (Achterblijvend)"
+            else: quad = "Improving (Verbeterend)"
+                
+            results.append({
+                "Naam": col, "RS_Ratio": x, "RS_Momentum": y, "Kwadrant": quad
+            })
     return pd.DataFrame(results)
 
-# --- 4. PRESENTATIE LAAG (USER INTERFACE) ---
+# --- 3. PRESENTATIE & STYLING LAAG ---
+
+def style_strict_scores(val: float) -> str:
+    """
+    Conditionele opmaak met harde drempels om ruis te filteren.
+    Alleen ECHT goede aandelen lichten groen op.
+    """
+    if pd.isna(val): return ''
+    if val >= 85:
+        return 'background-color: #198754; color: white; font-weight: bold;' # ECHT GOED (Felgroen)
+    elif val >= 65:
+        return 'background-color: #90EE90; color: black;' # Best oké (Lichtgroen)
+    elif val >= 45:
+        return 'background-color: #FFD700; color: black;' # Matig / Twijfel (Geel)
+    else:
+        return 'background-color: #DC3545; color: white;' # Slecht (Rood)
 
 def main() -> None:
-    st.title("🧠 Advanced Market & Sector Screener 7.5")
+    st.title("🧠 Pro Market Screener 8.0")
     
-    # --- ZIJSCHIRM (SIDEBAR) CONFIGURATIE ---
-    st.sidebar.header("⚙️ Markt & Sector Selectie")
-    selected_market_label = st.sidebar.selectbox("Kies een Markt", list(MARKETS.keys()))
-    max_stocks = st.sidebar.slider("Aantal aandelen in database", 10, 200, 60)
+    # --- ZIJBALK ---
+    st.sidebar.header("⚙️ Instellingen")
+    market_key = st.sidebar.selectbox("Kies Markt", list(MARKETS.keys()))
     
-    with st.spinner("Database laden..."):
-        constituents_df = get_market_constituents(selected_market_label)
-    
-    if constituents_df.empty:
-        st.warning("Geen data kunnen ophalen.")
-        return
+    with st.spinner("Data laden..."):
+        df_const = get_market_constituents(market_key).head(100) # Beperk tot 100 voor snelheid
         
-    # Beperk de database om de app snel te houden
-    constituents_df = constituents_df.head(max_stocks)
-    unique_sectors = constituents_df['Sector'].unique().tolist()
+    df_prices, benchmark = generate_market_simulation(df_const['Ticker'].tolist(), df_const['Sector'].tolist())
     
-    # Gevraagde functie: Sector selecteren in de app
-    selected_sector = st.sidebar.selectbox("Focus op specifieke Sector", unique_sectors)
-    
-    # Filter aandelen die bij de gekozen sector horen
-    sector_tickers = constituents_df[constituents_df['Sector'] == selected_sector]['Ticker'].tolist()
-    
-    # Bereken statistieken voor deze sector
-    metrics_df = generate_financial_metrics(constituents_df['Ticker'].tolist())
-    sector_metrics = metrics_df[metrics_df['Ticker'].isin(sector_tickers)]
-    
-    # Gevraagde functie: Toon prestatie t.o.v. eigen SMA50 in de linkerbalk
-    avg_perf_vs_sma50 = sector_metrics['Perf_vs_SMA50_%'].mean()
-    
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("📈 Sector Gezondheid")
-    st.sidebar.metric(
-        label=f"Prestatie {selected_sector} t.o.v. SMA50", 
-        value=f"{avg_perf_vs_sma50:.2f}%",
-        delta=f"{'Bullish' if avg_perf_vs_sma50 > 0 else 'Bearish'}"
-    )
-    
-    # --- HOOFDSCHERM TABBLADEN ---
-    tab1, tab2 = st.tabs(["🌍 Algemeen Marktoverzicht", "📊 Sector Diepte-Analyse"])
+    # --- TABBLADEN ---
+    tab1, tab2 = st.tabs(["🌍 Sector Rotatie (RRG)", "📊 Sector Aandelen Selectie"])
     
     with tab1:
-        st.header("Algemene Markt Status")
-        st.write("Hier zie je alle ingeladen bedrijven ongeacht de sector.")
-        full_display_df = metrics_df.merge(constituents_df, on="Ticker")
-        st.dataframe(full_display_df, use_container_width=True)
+        st.header("Sector Rotatie (Geldstromen)")
+        st.write("Dit kwadrant toont de gezondheid van **hele sectoren**. Rechtsboven (Leidend) is waar het grote geld naartoe stroomt.")
         
+        # Groepeer de aandelenprijzen per sector om sector-indices te maken
+        sector_prices = pd.DataFrame(index=df_prices.index)
+        for sector in df_const['Sector'].unique():
+            tickers_in_sector = df_const[df_const['Sector'] == sector]['Ticker'].tolist()
+            sector_prices[sector] = df_prices[tickers_in_sector].mean(axis=1)
+            
+        sector_rrg = calculate_rrg(sector_prices, benchmark)
+        
+        # Plotly RRG Grafiek
+        fig_rrg = px.scatter(
+            sector_rrg, x="RS_Ratio", y="RS_Momentum", text="Naam", color="Kwadrant",
+            color_discrete_map={"Leading (Leidend)": "green", "Improving (Verbeterend)": "blue", 
+                                "Lagging (Achterblijvend)": "red", "Weakening (Verzwakkend)": "orange"},
+            title="Relative Rotation Graph (Sectoren t.o.v. S&P 500)",
+            width=800, height=600
+        )
+        fig_rrg.add_hline(y=100, line_dash="dash", line_color="gray")
+        fig_rrg.add_vline(x=100, line_dash="dash", line_color="gray")
+        fig_rrg.update_traces(textposition='top center', marker=dict(size=15))
+        
+        # Voeg de kwadrant labels toe als achtergrond
+        fig_rrg.add_annotation(x=105, y=105, text="LEADING", showarrow=False, opacity=0.3, font=dict(size=30, color="green"))
+        fig_rrg.add_annotation(x=95, y=105, text="IMPROVING", showarrow=False, opacity=0.3, font=dict(size=30, color="blue"))
+        fig_rrg.add_annotation(x=95, y=95, text="LAGGING", showarrow=False, opacity=0.3, font=dict(size=30, color="red"))
+        fig_rrg.add_annotation(x=105, y=95, text="WEAKENING", showarrow=False, opacity=0.3, font=dict(size=30, color="orange"))
+        
+        st.plotly_chart(fig_rrg, use_container_width=True)
+        
+
     with tab2:
-        st.header(f"🔍 Diepgaande analyse: {selected_sector}")
-        st.write(f"Dit tabblad toont uitsluitend de {len(sector_tickers)} actieve aandelen binnen de sector **{selected_sector}**.")
+        selected_sector = st.selectbox("Selecteer een Sector om in te zoomen:", df_const['Sector'].unique())
+        sector_tickers = df_const[df_const['Sector'] == selected_sector]['Ticker'].tolist()
         
-        # Gevraagde functie: Keuze uit 3 manieren van visualiseren
-        view_mode = st.radio(
-            "Kies Visualisatie Type:",
-            ["Momentum View", "Value View", "Combo View"],
-            horizontal=True
-        )
+        st.write(f"### De beste kandidaten in **{selected_sector}**")
+        st.write("Let op de kleuren: Alleen scores boven de **85** (Felgroen) zijn echt uitmuntend. Geel of Rood betekent wegblijven, zelfs al is het de beste van de sector.")
         
-        # Strategie-bepaling op basis van de geselecteerde weergave met modern Pattern Matching (Python 3.10+)
-        match view_mode:
-            case "Momentum View":
-                x_axis, y_axis, score_col = "Perf_vs_SMA50_%", "Momentum_Score", "Momentum_Score"
-                color_scale = px.colors.sequential.Viridis
-                st.info("ℹ️ **Momentum View:** Focus op aandelen die sterk presteren ten opzichte van hun 50-daags gemiddelde en opwaartse snelheid hebben.")
-            case "Value View":
-                x_axis, y_axis, score_col = "Value_Score", "Current_Price", "Value_Score"
-                color_scale = px.colors.sequential.Cividis
-                st.info("ℹ️ **Value View:** Zoekt naar ondergewaardeerde parels op basis van fundamentele rekenmodellen.")
-            case "Combo View":
-                x_axis, y_axis, score_col = "Value_Score", "Momentum_Score", "Combo_Score"
-                color_scale = px.colors.sequential.Plasma
-                st.info("ℹ️ **Combo View:** De ultieme hybride weergave. Rechtsboven vind je aandelen die én goedkoop zijn (Value) én hard stijgen (Momentum).")
+        # Bereken huidige statistieken
+        results = []
+        for t in sector_tickers:
+            current = df_prices[t].iloc[-1]
+            sma50 = df_prices[t].rolling(50).mean().iloc[-1]
+            perf_sma = ((current - sma50) / sma50) * 100
+            
+            # Simulatie van stricte scores (0-100)
+            mom_score = np.clip(perf_sma * 4 + 40, 0, 100) 
+            val_score = np.clip(np.random.normal(50, 25), 0, 100)
+            combo = (mom_score * 0.6) + (val_score * 0.4)
+            
+            results.append({
+                "Ticker": t,
+                "Prijs ($)": round(current, 2),
+                "Perf vs SMA50 (%)": round(perf_sma, 2),
+                "Momentum Score": round(mom_score, 1),
+                "Value Score": round(val_score, 1),
+                "Combo Score": round(combo, 1)
+            })
+            
+        df_results = pd.DataFrame(results).sort_values(by="Combo Score", ascending=False).reset_index(drop=True)
+        df_results.index += 1 # Start index bij 1
         
-        # Bouw de Plotly grafiek dynamisch op
-        fig = px.scatter(
-            sector_metrics, 
-            x=x_axis, 
-            y=y_axis, 
-            text="Ticker", 
-            size=score_col,
-            color=score_col,
-            color_continuous_scale=color_scale,
-            title=f"{view_mode} - Actieve Kandidaten",
-            labels={x_axis: f"As: {x_axis}", y_axis: f"As: {y_axis}"}
-        )
-        fig.update_traces(textposition='top center')
-        st.plotly_chart(fig, use_container_width=True)
+        # Toepassen van de strict geconfigureerde conditionele opmaak
+        styled_df = df_results.style.map(
+            style_strict_scores, 
+            subset=['Momentum Score', 'Value Score', 'Combo Score']
+        ).format(precision=2)
         
-        # Gevraagde functie: Rangschikking in tabelvorm eronder met de beste kandidaten
-        st.subheader("🏆 Rangschikking: Beste Kandidaten")
-        
-        # Sorteer de tabel op basis van de gekozen weergave-score (hoogste score bovenaan)
-        ranked_sector_df = sector_metrics.sort_values(by=score_col, ascending=False).reset_index(drop=True)
-        
-        # Voeg een visuele ranking-plaats toe (#1, #2, #3...)
-        ranked_sector_df.index = ranked_sector_df.index + 1
-        ranked_sector_df.index.name = "Plaats"
-        
-        st.dataframe(
-            ranked_sector_df[['Ticker', 'Current_Price', 'Perf_vs_SMA50_%', 'Momentum_Score', 'Value_Score', 'Combo_Score']], 
-            use_container_width=True
-        )
+        st.dataframe(styled_df, use_container_width=True)
 
 if __name__ == "__main__":
     main()
