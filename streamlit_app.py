@@ -1,207 +1,227 @@
-import io
-import math
 import warnings
+import math
 from typing import Dict, Any, List, Tuple
 import numpy as np
 import pandas as pd
 import plotly.express as px
-import requests
+import plotly.graph_objects as go
+import yfinance as yf
 import streamlit as st
 
-# Onderdruk waarschuwingen
 warnings.filterwarnings("ignore")
 
 # --- CONFIGURATIE ---
-st.set_page_config(page_title="Pro Market Screener 8.0 (RRG & Sector Flow)", layout="wide", page_icon="🧠")
+st.set_page_config(page_title="Hedge Fund Screener 9.0 (Quant Edition)", layout="wide", page_icon="📈")
 
-MARKETS: Dict[str, Dict[str, Any]] = {
-    "🇺🇸 USA - S&P 500": {
-        "code": "SP500", "benchmark": "SPY", 
-        "wiki": "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    }
-}
-
-# --- 1. DATA INGESTIE LAAG ---
+# --- 1. DATA LAAG (LAZY LOADING & CACHING) ---
+@st.cache_data(ttl=3600)
+def fetch_market_data(tickers: List[str], period: str = "1y") -> pd.DataFrame:
+    """Haalt historische koersen op in bulk (Snel en efficiënt)."""
+    try:
+        # Download in bulk om yfinance API limieten te respecteren
+        data = yf.download(tickers, period=period, progress=False)['Adj Close']
+        return data.ffill().dropna(axis=1, how='all')
+    except Exception as e:
+        st.error(f"Data ophaalfout: {e}")
+        return pd.DataFrame()
 
 @st.cache_data(ttl=86400)
-def get_market_constituents(market_key: str) -> pd.DataFrame:
-    mkt = MARKETS.get(market_key, {})
-    url = mkt.get('wiki', '')
-    
-    if not url: return pd.DataFrame()
-        
-    headers = {"User-Agent": "ProMarketBot/2.0 (Contact: info@enterprise.com)"}
+def fetch_fundamentals(ticker: str) -> Dict[str, float]:
+    """
+    Live Fundamental Ingestion (Novy-Marx & Fama-French).
+    Lazy-loaded om IP-bans te voorkomen.
+    """
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        tables = pd.read_html(io.StringIO(response.text))
+        info = yf.Ticker(ticker).info
+        gp = info.get('grossProfits', np.nan)
+        ta = info.get('totalAssets', np.nan)
+        pb = info.get('priceToBook', np.nan)
         
-        target_df = next(df for df in tables if any("symbol" in str(c).lower() for c in df.columns))
-        ticker_col = next(c for c in target_df.columns if "Symbol" in str(c) or "Ticker" in str(c))
-        sector_col = next(c for c in target_df.columns if "Sector" in str(c))
+        # Gross Profitability Premium (GP/A)
+        gpa = gp / ta if ta and gp else np.nan
         
-        df_clean = target_df[[ticker_col, sector_col]].copy()
-        df_clean.columns = ['Ticker', 'Sector']
-        df_clean['Ticker'] = df_clean['Ticker'].str.replace('.', '-', regex=False)
-        return df_clean
+        return {"GP_A": gpa, "P_B": pb}
     except Exception:
-        return pd.DataFrame([
-            ("AAPL", "Technology"), ("MSFT", "Technology"), ("JNJ", "Healthcare"),
-            ("JPM", "Financials"), ("XOM", "Energy"), ("PG", "Consumer Staples")
-        ], columns=['Ticker', 'Sector'])
+        return {"GP_A": np.nan, "P_B": np.nan}
 
-# --- 2. QUANT ENGINE (REKENKERN) ---
+# --- 2. QUANT MATHEMATICS LAAG ---
 
-@st.cache_data(ttl=3600)
-def generate_market_simulation(tickers: List[str], sectors: List[str], days: int = 100) -> Tuple[pd.DataFrame, pd.Series]:
-    """Genereert realistische historische data voor de RRG berekening."""
-    np.random.seed(42)
-    dates = pd.date_range(end=pd.Timestamp.now(), periods=days)
-    
-    # We voegen een sector-bias toe zodat sectoren realistisch groeperen
-    sector_biases = {sector: np.random.uniform(-0.5, 0.5) for sector in set(sectors)}
-    
-    price_data = {}
-    for t, s in zip(tickers, sectors):
-        # Random walk met een drift gebaseerd op de sector
-        drift = sector_biases[s] + np.random.uniform(-0.2, 0.2)
-        daily_returns = np.random.normal(loc=drift, scale=2.0, size=days)
-        price_data[t] = 100 * np.exp(np.cumsum(daily_returns / 100))
-        
-    df_prices = pd.DataFrame(price_data, index=dates)
-    
-    # Benchmark (S&P 500 simulatie) is het gemiddelde van alles
-    benchmark = df_prices.mean(axis=1)
-    
-    return df_prices, benchmark
-
-def calculate_rrg(price_df: pd.DataFrame, benchmark: pd.Series, window: int = 14) -> pd.DataFrame:
-    """Berekent de wiskundige RRG coördinaten."""
+def calc_rrg(price_df: pd.DataFrame, benchmark: pd.Series, window: int = 14) -> pd.DataFrame:
+    """Berekent wiskundige RRG coördinaten."""
     results = []
     for col in price_df.columns:
-        # Relatieve Sterkte
+        if col == benchmark.name: continue
+        
         rs = (price_df[col] / benchmark) * 100
         rs_ratio = rs.rolling(window=window).mean()
-        # Momentum van die relatieve sterkte
         rs_momentum = rs_ratio.pct_change(periods=5) * 100 + 100
         
         if not math.isnan(rs_ratio.iloc[-1]):
-            x, y = rs_ratio.iloc[-1], rs_momentum.iloc[-1]
-            
-            # Bepaal Kwadrant
-            if x >= 100 and y >= 100: quad = "Leading (Leidend)"
-            elif x >= 100 and y < 100: quad = "Weakening (Verzwakkend)"
-            elif x < 100 and y < 100: quad = "Lagging (Achterblijvend)"
-            else: quad = "Improving (Verbeterend)"
-                
             results.append({
-                "Naam": col, "RS_Ratio": x, "RS_Momentum": y, "Kwadrant": quad
+                "Ticker": col,
+                "RS_Ratio": rs_ratio.iloc[-1],
+                "RS_Momentum": rs_momentum.iloc[-1]
             })
     return pd.DataFrame(results)
 
-# --- 3. PRESENTATIE & STYLING LAAG ---
+def apply_faber_logic(current_ranks: pd.Series, prev_ranks: pd.Series) -> pd.Series:
+    """
+    Implementatie van Faber's Turnover Reductie Hysterese.
+    Koop Top 3. Houd vast zolang in Top 5. Anders Verkoop.
+    """
+    status = []
+    for ticker in current_ranks.index:
+        curr = current_ranks.get(ticker, 999)
+        prev = prev_ranks.get(ticker, 999)
+        
+        if curr <= 3:
+            status.append("KOPEN (Top 3)")
+        elif 3 < curr <= 5 and prev <= 3:
+            status.append("HOUDEN (Gedegradeerd, maar in Top 5)")
+        elif curr <= 5:
+            status.append("HOUDEN (In observatie)")
+        else:
+            status.append("VERKOPEN (Uit Top 5)")
+    return pd.Series(status, index=current_ranks.index)
 
-def style_strict_scores(val: float) -> str:
-    """
-    Conditionele opmaak met harde drempels om ruis te filteren.
-    Alleen ECHT goede aandelen lichten groen op.
-    """
-    if pd.isna(val): return ''
-    if val >= 85:
-        return 'background-color: #198754; color: white; font-weight: bold;' # ECHT GOED (Felgroen)
-    elif val >= 65:
-        return 'background-color: #90EE90; color: black;' # Best oké (Lichtgroen)
-    elif val >= 45:
-        return 'background-color: #FFD700; color: black;' # Matig / Twijfel (Geel)
-    else:
-        return 'background-color: #DC3545; color: white;' # Slecht (Rood)
+# --- 3. PRESENTATIE LAAG (UI & DASHBOARDS) ---
 
 def main() -> None:
-    st.title("🧠 Pro Market Screener 8.0")
+    st.title("📈 Hedge Fund Quant Terminal 9.0")
+    st.markdown("Integratie van Novy-Marx Profitability, Phase Space Attractors en Dorsey Wright.")
     
-    # --- ZIJBALK ---
-    st.sidebar.header("⚙️ Instellingen")
-    market_key = st.sidebar.selectbox("Kies Markt", list(MARKETS.keys()))
+    # Simuleer een universum voor de demonstratie om laadtijden te besparen
+    sector_map = {
+        "AAPL": "Tech", "MSFT": "Tech", "NVDA": "Tech", 
+        "JPM": "Fin", "BAC": "Fin", "GS": "Fin",
+        "JNJ": "Health", "PFE": "Health", "UNH": "Health",
+        "XOM": "Energy", "CVX": "Energy", "SPY": "Benchmark"
+    }
+    tickers = list(sector_map.keys())
     
-    with st.spinner("Data laden..."):
-        df_const = get_market_constituents(market_key).head(100) # Beperk tot 100 voor snelheid
+    with st.spinner("Kwantitatieve modellen initialiseren..."):
+        df_prices = fetch_market_data(tickers, period="1y")
         
-    df_prices, benchmark = generate_market_simulation(df_const['Ticker'].tolist(), df_const['Sector'].tolist())
+    if df_prices.empty:
+        st.stop()
+        
+    benchmark = df_prices['SPY']
+    universe = df_prices.drop(columns=['SPY'])
     
-    # --- TABBLADEN ---
-    tab1, tab2 = st.tabs(["🌍 Sector Rotatie (RRG)", "📊 Sector Aandelen Selectie"])
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "🌐 Macro & Correlatie", "🔥 Dorsey Wright RS Matrix", 
+        "🔬 Deep Dive & Phase Space", "🤖 AI Analist"
+    ])
     
     with tab1:
-        st.header("Sector Rotatie (Geldstromen)")
-        st.write("Dit kwadrant toont de gezondheid van **hele sectoren**. Rechtsboven (Leidend) is waar het grote geld naartoe stroomt.")
+        st.header("Sector Rotatie & Correlatiedispersie")
+        col1, col2 = st.columns(2)
         
-        # Groepeer de aandelenprijzen per sector om sector-indices te maken
-        sector_prices = pd.DataFrame(index=df_prices.index)
-        for sector in df_const['Sector'].unique():
-            tickers_in_sector = df_const[df_const['Sector'] == sector]['Ticker'].tolist()
-            sector_prices[sector] = df_prices[tickers_in_sector].mean(axis=1)
+        with col1:
+            # RRG (Huidige snapshot)
+            rrg_df = calc_rrg(universe, benchmark)
+            rrg_df['Sector'] = rrg_df['Ticker'].map(sector_map)
             
-        sector_rrg = calculate_rrg(sector_prices, benchmark)
-        
-        # Plotly RRG Grafiek
-        fig_rrg = px.scatter(
-            sector_rrg, x="RS_Ratio", y="RS_Momentum", text="Naam", color="Kwadrant",
-            color_discrete_map={"Leading (Leidend)": "green", "Improving (Verbeterend)": "blue", 
-                                "Lagging (Achterblijvend)": "red", "Weakening (Verzwakkend)": "orange"},
-            title="Relative Rotation Graph (Sectoren t.o.v. S&P 500)",
-            width=800, height=600
-        )
-        fig_rrg.add_hline(y=100, line_dash="dash", line_color="gray")
-        fig_rrg.add_vline(x=100, line_dash="dash", line_color="gray")
-        fig_rrg.update_traces(textposition='top center', marker=dict(size=15))
-        
-        # Voeg de kwadrant labels toe als achtergrond
-        fig_rrg.add_annotation(x=105, y=105, text="LEADING", showarrow=False, opacity=0.3, font=dict(size=30, color="green"))
-        fig_rrg.add_annotation(x=95, y=105, text="IMPROVING", showarrow=False, opacity=0.3, font=dict(size=30, color="blue"))
-        fig_rrg.add_annotation(x=95, y=95, text="LAGGING", showarrow=False, opacity=0.3, font=dict(size=30, color="red"))
-        fig_rrg.add_annotation(x=105, y=95, text="WEAKENING", showarrow=False, opacity=0.3, font=dict(size=30, color="orange"))
-        
-        st.plotly_chart(fig_rrg, use_container_width=True)
-        
+            fig_rrg = px.scatter(
+                rrg_df, x="RS_Ratio", y="RS_Momentum", text="Ticker", color="Sector",
+                title="Relative Rotation Graph"
+            )
+            fig_rrg.add_hline(y=100, line_dash="dash"); fig_rrg.add_vline(x=100, line_dash="dash")
+            st.plotly_chart(fig_rrg, use_container_width=True)
+            
+        with col2:
+            # Correlatie Matrix
+            returns = universe.pct_change().dropna()
+            corr_matrix = returns.corr()
+            
+            fig_corr = px.imshow(
+                corr_matrix, text_auto=True, color_continuous_scale='RdBu_r',
+                title="Correlatie Heatmap (Dispersie Check)"
+            )
+            st.plotly_chart(fig_corr, use_container_width=True)
+            st.caption("Lage correlatie (blauw/wit) is noodzakelijk voor succesvolle sectorrotatie.")
 
     with tab2:
-        selected_sector = st.selectbox("Selecteer een Sector om in te zoomen:", df_const['Sector'].unique())
-        sector_tickers = df_const[df_const['Sector'] == selected_sector]['Ticker'].tolist()
+        st.header("Dorsey Wright Relative Strength Matrix")
+        st.write("Head-to-head P&F vergelijking (gesimuleerd op basis van RS ratio's).")
         
-        st.write(f"### De beste kandidaten in **{selected_sector}**")
-        st.write("Let op de kleuren: Alleen scores boven de **85** (Felgroen) zijn echt uitmuntend. Geel of Rood betekent wegblijven, zelfs al is het de beste van de sector.")
+        # Simpele Head-to-Head win-matrix gebaseerd op 6-maands rendement
+        perf_6m = (universe.iloc[-1] / universe.iloc[-126]) - 1
+        matrix = pd.DataFrame(index=perf_6m.index, columns=perf_6m.index)
         
-        # Bereken huidige statistieken
-        results = []
-        for t in sector_tickers:
-            current = df_prices[t].iloc[-1]
-            sma50 = df_prices[t].rolling(50).mean().iloc[-1]
-            perf_sma = ((current - sma50) / sma50) * 100
+        for t1 in matrix.index:
+            for t2 in matrix.columns:
+                if t1 == t2: matrix.loc[t1, t2] = np.nan
+                else: matrix.loc[t1, t2] = 1 if perf_6m[t1] > perf_6m[t2] else 0
+                
+        matrix['Wins'] = matrix.sum(axis=1)
+        matrix = matrix.sort_values(by='Wins', ascending=False)
+        
+        # Faber Logic Toepassen (Vergelijk huidige ranking met ranking 1 maand geleden)
+        perf_7m_to_1m = (universe.iloc[-21] / universe.iloc[-147]) - 1
+        prev_rank = perf_7m_to_1m.rank(ascending=False)
+        curr_rank = perf_6m.rank(ascending=False)
+        
+        portfolio_status = apply_faber_logic(curr_rank, prev_rank)
+        
+        display_df = pd.DataFrame({
+            "6M Return": (perf_6m * 100).round(2).astype(str) + "%",
+            "Matrix Wins": matrix['Wins'],
+            "Portfolio Status (Faber)": portfolio_status
+        }).sort_values(by="Matrix Wins", ascending=False)
+        
+        st.dataframe(display_df, use_container_width=True)
+
+    with tab3:
+        st.header("Diepte-Analyse & Wiskundige Attractors")
+        selected_stock = st.selectbox("Selecteer aandeel voor Deep Dive:", universe.columns)
+        
+        st.subheader("1. Fama-French & Novy-Marx Fundamentals (Live)")
+        with st.spinner("Live bedrijfsdata ophalen via API..."):
+            funds = fetch_fundamentals(selected_stock)
             
-            # Simulatie van stricte scores (0-100)
-            mom_score = np.clip(perf_sma * 4 + 40, 0, 100) 
-            val_score = np.clip(np.random.normal(50, 25), 0, 100)
-            combo = (mom_score * 0.6) + (val_score * 0.4)
-            
-            results.append({
-                "Ticker": t,
-                "Prijs ($)": round(current, 2),
-                "Perf vs SMA50 (%)": round(perf_sma, 2),
-                "Momentum Score": round(mom_score, 1),
-                "Value Score": round(val_score, 1),
-                "Combo Score": round(combo, 1)
-            })
-            
-        df_results = pd.DataFrame(results).sort_values(by="Combo Score", ascending=False).reset_index(drop=True)
-        df_results.index += 1 # Start index bij 1
+        m1, m2 = st.columns(2)
+        m1.metric("Gross Profitability (GP/A)", f"{funds['GP_A']:.4f}" if not pd.isna(funds['GP_A']) else "N/B", 
+                  help="Hoge GP/A wijst op kwaliteitsbedrijven (Novy-Marx).")
+        m2.metric("Price-to-Book (P/B)", f"{funds['P_B']:.2f}" if not pd.isna(funds['P_B']) else "N/B", 
+                  help="Waardering ten opzichte van boekwaarde (Fama-French).")
         
-        # Toepassen van de strict geconfigureerde conditionele opmaak
-        styled_df = df_results.style.map(
-            style_strict_scores, 
-            subset=['Momentum Score', 'Value Score', 'Combo Score']
-        ).format(precision=2)
+        st.subheader("2. Phase Space Attractor (Chaostheorie)")
+        tau = st.slider("Time Delay ($\tau$ in dagen)", 1, 20, 5)
         
-        st.dataframe(styled_df, use_container_width=True)
+        # Phase Space Berekening (r(t) vs r(t-tau))
+        daily_ret = returns[selected_stock]
+        delayed_ret = daily_ret.shift(tau)
+        
+        phase_df = pd.DataFrame({'r_t': daily_ret, 'r_t_tau': delayed_ret}).dropna()
+        
+        fig_phase = px.scatter(
+            phase_df, x='r_t_tau', y='r_t', opacity=0.5,
+            title=f"Phase Space Plot: $r(t)$ vs $r(t-{tau})$",
+            labels={'r_t_tau': f'Return T-{tau}', 'r_t': 'Return T'}
+        )
+        st.plotly_chart(fig_phase, use_container_width=True)
+        st.caption("Concentreert de wolk zich in een ellips? Dan is er sprake van een stable-focus (trend). Is het een perfecte cirkel of random verdeeld? Dan heerst er aperiodieke chaos.")
+
+    with tab4:
+        st.header("AI Analyst 2.0 (Deep Research)")
+        if st.button("Genereer Quant Prompt"):
+            prompt = f"""
+**De Quant Analyst Agent:** Evalueer de fundamentele en wiskundige status van {selected_stock}.
+
+JULLIE OPDRACHT:
+
+1. FUNDAMENTELE AUDIT (Novy-Marx & Value):
+De huidige Gross Profitability (GP/A) is {funds['GP_A']:.4f} en de P/B ratio is {funds['P_B']:.2f}. Beoordeel dit profiel ten opzichte van sector-gemiddelden. Is dit een value trap of een high-quality compounder?
+
+2. KINETICA & CHAOS (Huffaker):
+De Phase Space Attractor toont de correlatie tussen r(t) en r(t-{tau}). Analyseer of de huidige marktfase van dit aandeel convergeert (stable trend) of fragmenteert (chaos).
+
+3. PORTFOLIO MANAGEMENT (Faber & Dorsey Wright):
+Dit aandeel heeft de status: '{portfolio_status[selected_stock]}'. De actuele correlatie met de brede markt is {corr_matrix.loc[selected_stock, 'SPY']:.2f}. 
+Bepaal de optimale positiegrootte. Als de correlatie hoog is en de dispersie laag, adviseer dan om de positie te verkleinen.
+            """
+            st.text_area("Kopieer deze data-gedreven prompt naar je LLM:", prompt, height=350)
 
 if __name__ == "__main__":
     main()
